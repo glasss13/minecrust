@@ -15,7 +15,12 @@ pub(crate) trait FromByteBuffer: Sized {
 /// Represents a stream of bytes and allows for conversion to and from different types.
 /// Internally keeps track of position in the buffer to allow for behavior similiar to `Iterators`.
 ///
+/// Differs from [`Vec`] in terms of memory as all memory allocations are explicit using functions like [`with_size`] or [`resize`]
+///
 /// Used in conjuction with [`FromByteBuffer`].
+///
+/// [`with_size`]: crate::byte_buffer::ByteBuffer::with_size
+/// [`resize`]: crate::byte_buffer::ByteBuffer::resize
 pub(crate) struct ByteBuffer {
     buffer: Vec<u8>,
     position: usize,
@@ -72,18 +77,19 @@ impl ByteBuffer {
 
     /// Used with the [`FromByteBuffer`] trait to try to consume a buffer and construct the generically specified type
     ///
-    /// Returns `None` if the buffer runs out or if the type is not encoded in the buffer
+    /// Returns `None` if it out of bounds of the buffer's capacity or hasn't filled that far.
+    /// Also if the type is not encoded in the buffer properly.
     pub(crate) fn consume<T: FromByteBuffer>(&mut self) -> Option<T> {
         T::from_byte_buffer(self)
     }
 
     /// Consume the passed amount of bytes
     ///
-    /// Returns `None` if it reaches the end of the buffer before it gets all the bytes
+    /// Returns `None` if it out of bounds of the buffer's capacity or hasn't filled that far.
     pub(crate) fn consume_bytes(&mut self, num_bytes: usize) -> Option<&[u8]> {
         let out = self.buffer.get(self.position..self.position + num_bytes);
 
-        if let Some(ret_bytes) = out {
+        if let Some(_) = out {
             self.position += num_bytes;
             return out;
         }
@@ -93,13 +99,13 @@ impl ByteBuffer {
     /// Peeking is similiar to consuming except it doen't increment the internal position.
     /// Because it doesn't increment the internal position it doesn't effectively consume the bytes, hence why it "peeks."
     ///
-    /// Returns none if the buffer isn't big enough
+    /// Returns `None` if it out of bounds of the buffer's capacity or hasn't filled that far.
     pub(crate) fn peek_bytes(&self, num_bytes: usize) -> Option<&[u8]> {
         self.buffer.get(self.position..self.position + num_bytes)
     }
 
     /// Similiar to [`peek_bytes`] except it guarantees that it returns a valid buffer.
-    /// This is possible because it will return either up to the amount of bytes specified or until the end of the buffer, whichever comes first.
+    /// This is possible because it will return either up to the amount of bytes specified or until the end of the bound of the buffer, whichever comes first.
     ///
     /// [`peek_bytes`]: crate::byte_buffer::ByteBuffer::peek_bytes
     pub(crate) fn peek_up_to_bytes(&self, num_bytes: usize) -> &[u8] {
