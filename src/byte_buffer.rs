@@ -42,14 +42,27 @@ impl ByteBuffer {
         }
     }
 
-    /// Changes the size of the buffer in place, if expanding fills with zeros
+    /// Changes the size of the buffer.
     ///
-    /// If the current position would be out of bounds after the resize, the position is set to the last position
+    /// If the current position would be out of bounds after the resize, the position is set to the last position otherwise it is preserved
+    ///
+    /// # Notes
+    ///
+    /// This function is very expensive.
     pub(crate) fn resize(&mut self, new_size: usize) {
         if self.position >= new_size {
             self.position = new_size - 1;
         }
-        self.buffer.resize(new_size, 0);
+
+        let mut new_buf = Vec::with_capacity(new_size);
+
+        if self.buffer.capacity() > new_size {
+            new_buf.extend_from_slice(&self.buffer[..new_size]);
+        } else {
+            new_buf.extend_from_slice(&self.buffer);
+        }
+
+        self.buffer = new_buf;
     }
 
     /// Gets the number of bytes not yet consumed - calculated off the current internal position
