@@ -25,6 +25,9 @@ impl ByteBuffer {
     }
 
     pub fn resize(&mut self, new_size: usize) {
+        if self.position >= new_size {
+            self.position = new_size - 1;
+        }
         self.buffer.resize(new_size, 0);
     }
 
