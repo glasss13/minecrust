@@ -41,8 +41,12 @@ impl ByteBuffer {
 
     pub fn consume_bytes(&mut self, num_bytes: usize) -> Option<&[u8]> {
         let out = self.buffer.get(self.position..self.position + num_bytes);
-        self.position += num_bytes;
-        out
+
+        if let Some(ret_bytes) = out {
+            self.position += num_bytes;
+            return out;
+        }
+        None
     }
 
     pub fn peek_bytes(&self, num_bytes: usize) -> Option<&[u8]> {
