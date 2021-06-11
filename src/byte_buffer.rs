@@ -79,6 +79,21 @@ impl ByteBuffer {
         self.buffer = new_buf;
     }
 
+    /// Gets the current position the buffer is at in the data
+    ///
+    /// Returns `None` when the backing buffer is not allocated.
+    pub(crate) fn position(&self) -> Option<usize> {
+        self.position
+    }
+
+    pub(crate) fn buffer(&self) -> &Vec<u8> {
+        &self.buffer
+    }
+
+    pub(crate) fn buffer_mut(&mut self) -> &mut Vec<u8> {
+        &mut self.buffer
+    }
+
     /// Gets the number of bytes not yet consumed - calculated off the current internal position.
     ///
     /// If the position is uninitialized returns 0.
@@ -129,5 +144,42 @@ impl ByteBuffer {
         let bytes_to_peak = num_bytes.min(self.bytes_not_consumed());
 
         self.peek_bytes(bytes_to_peak).unwrap()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_construct() {
+        let constructed_with_new = ByteBuffer::new();
+
+        assert_eq!(constructed_with_new.buffer.len(), 0);
+        assert_eq!(constructed_with_new.buffer.capacity(), 0);
+        assert_eq!(constructed_with_new.position, None);
+
+        let constructed_with_size = ByteBuffer::with_size(1);
+
+        assert_eq!(constructed_with_size.buffer.len(), 0);
+        assert_eq!(constructed_with_size.buffer.capacity(), 1);
+        assert_eq!(constructed_with_size.position.unwrap(), 0);
+    }
+
+    #[test]
+    fn test_resize() {
+        let mut buffer = ByteBuffer::new();
+
+        buffer.resize(2);
+
+        assert_eq!(buffer.buffer.capacity(), 2);
+        assert_eq!(buffer.buffer.len(), 0);
+        assert_eq!(buffer.position.unwrap(), 0);
+
+        buffer.resize(0);
+
+        assert_eq!(buffer.buffer.capacity(), 0);
+        assert_eq!(buffer.buffer.len(), 0);
+        assert_eq!(buffer.position, None);
     }
 }
