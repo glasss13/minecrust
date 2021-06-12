@@ -1,4 +1,4 @@
-//! A growable, heap-allocated stream of bytes that can be manipulated with the `FromByteBuffer` trait
+//! An explicitly resizable, heap-allocated stream of bytes that can be manipulated with the `FromByteBuffer` trait
 
 /// The main interface between [`ByteBuffer`] and [`network_types`].
 ///
@@ -7,8 +7,14 @@
 ///
 /// [`network_types`]: crate::network_types
 pub(crate) trait FromByteBuffer: Sized {
-    fn from_byte_buffer(buffer: &ByteBuffer) -> Option<Self>;
+    /// Consumes the `ByteBuffer` and returns the implemented type.
+    ///
+    /// Returns `None` if the type isn't properly encoded for in the current position in the `ByteBuffer`.
+    fn from_byte_buffer(buffer: &mut ByteBuffer) -> Option<Self>;
 
+    /// Gets the size in bytes the implemented type would consume if `from_byte_buffer` is ran, doesn't consume.
+    ///
+    /// Returns `None` if the type isn't properly encoded for in the current position in the `ByteBuffer`.
     fn size_from_byte_buffer(buffer: &ByteBuffer) -> Option<usize>;
 }
 
@@ -106,12 +112,7 @@ impl ByteBuffer {
     /// Returns `None` if it out of bounds or the buffer hasn't been filled to the position yet.
     /// Also if the type is not encoded in the buffer properly.
     pub(crate) fn consume<T: FromByteBuffer>(&mut self) -> Option<T> {
-        let out = T::from_byte_buffer(self);
-
-        if let Some(_) = out {
-            self.position = Some(self.position? + T::size_from_byte_buffer(self)?);
-        }
-        out
+        T::from_byte_buffer(self)
     }
 
     /// Consume the passed amount of bytes
@@ -149,6 +150,8 @@ impl ByteBuffer {
 
 #[cfg(test)]
 mod tests {
+    use crate::network_types::Varint;
+
     use super::*;
 
     #[test]
@@ -175,11 +178,16 @@ mod tests {
         assert_eq!(buffer.buffer.capacity(), 2);
         assert_eq!(buffer.buffer.len(), 0);
         assert_eq!(buffer.position.unwrap(), 0);
+        buffer.buffer_mut().extend_from_slice(&vec![0xff, 0x7f]);
+        let bytes = buffer.consume_bytes(2).unwrap();
+        assert_eq!(bytes, vec![0xff, 0x7f]);
 
-        buffer.resize(0);
+        buffer.resize(1);
 
-        assert_eq!(buffer.buffer.capacity(), 0);
-        assert_eq!(buffer.buffer.len(), 0);
-        assert_eq!(buffer.position, None);
+        assert_eq!(buffer.buffer.capacity(), 1);
+        assert_eq!(buffer.buffer.len(), 1);
+        assert_eq!(buffer.position.unwrap(), 0);
+        let bytes = buffer.consume_bytes(1).unwrap();
+        assert_eq!(bytes, vec![0xff]);
     }
 }
