@@ -1,21 +1,20 @@
 //! Types that are used to communicate over a TCP stream with the Minecraft Protocol.
-//! A full list of the types can be found at https://wiki.vg/index.php?title=Protocol&oldid=7368#Data_types.
+//! A full list of the types can be found at <https://wiki.vg/index.php?title=Protocol&oldid=7368#Data_types>.
 //!
 //! Every type that is going to be received or sent should implement the [`NetworkType`] trait.
-
 /// A trait that can be implemented on a [`BufRead`] to consume it and construct a [`NetworkType`].
 ///
 /// [`BufRead`]: std::io::BufRead
-pub(crate) trait NetworkTypeProducer
+pub(crate) trait NetworkTypeReader
 where
     Self: std::io::BufRead,
 {
-    /// Creates a network type from a [`std::io::BufRead`].
+    /// Creates a network type by consuming from a [`std::io::BufRead`].
     ///
     /// # Panics
     ///
     /// This function will panic if the underlying reader was read, but returned an error.
-    fn produce_network_type<T: NetworkType>(&mut self) -> Option<T> {
+    fn read_network_type<T: NetworkType>(&mut self) -> Option<T> {
         let bytes = self.fill_buf().expect("Reached end of stream.");
 
         let size_to_consume = T::size_from_bytes(bytes)?;
@@ -24,6 +23,18 @@ where
         self.consume(size_to_consume);
 
         Some(result)
+    }
+}
+
+pub(crate) trait NetworkTypeWriter
+where
+    Self: std::io::Write,
+{
+    fn write_network_type<T: NetworkType>(&mut self, network_type: &T) -> std::io::Result<()> {
+        self.write_all(network_type.as_bytes())?;
+        self.flush()?;
+
+        Ok(())
     }
 }
 
@@ -48,6 +59,9 @@ pub(crate) trait NetworkType: Sized {
     /// Size of the [`NetworkType`] when represented as a pure stream of bytes.
     fn size_as_bytes(&self) -> usize;
 
+    /// Returns the actual byte representation of the `NetworkType` to be sent over the stream.
+    fn as_bytes(&self) -> &[u8];
+
     /// If no assumptions can be made about the data, this is the minimum amount of bytes recommended to be passed to [`size_from_bytes`] to determine
     /// the length.
     ///
@@ -57,7 +71,7 @@ pub(crate) trait NetworkType: Sized {
 
 /// A variable length, heap allocated, signed 32 bit integer type used over the [Minecraft network protocol](https://wiki.vg/index.php?title=Protocol&oldid=7368).
 ///
-/// For internal byte encoding see https://wiki.vg/index.php?title=Protocol&oldid=7368#VarInt_and_VarLong.
+/// For internal byte encoding see <https://wiki.vg/index.php?title=Protocol&oldid=7368#VarInt_and_VarLong>.
 #[derive(Debug)]
 pub(crate) struct Varint {
     bytes: Vec<u8>,
@@ -88,6 +102,10 @@ impl NetworkType for Varint {
     }
 
     const SIZE_TO_READ: usize = 5;
+
+    fn as_bytes(&self) -> &[u8] {
+        &self.bytes
+    }
 }
 
 impl Varint
@@ -137,6 +155,18 @@ where
         result
     }
 
+    pub(crate) fn size_from_int32(num: i32) -> usize {
+        let mut input = num;
+        for i in 0..5 {
+            input = (input as u32 >> 7) as i32;
+
+            if input == 0 {
+                return i + 1;
+            }
+        }
+        unreachable!();
+    }
+
     /// Checks encoding of bytes for proper `Varint`.
     fn bytes_are_valid_varint(buffer: &[u8]) -> bool {
         if buffer.len() < 1 || buffer.len() > 5 {
@@ -157,14 +187,72 @@ where
     }
 }
 
+/// UTF-8 string prefixed with its size in bytes as a VarInt.
+pub type NetworkString = String;
+
+impl NetworkType for NetworkString {
+    fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        let string_length_varint = Varint::from_bytes(bytes)?;
+        let string_length = string_length_varint.to_i32();
+        if string_length < 1 {
+            return None;
+        }
+
+        let sizeof_string_length = string_length_varint.as_bytes().len();
+
+        if bytes.len() < string_length as usize + sizeof_string_length {
+            return None;
+        }
+
+        String::from_utf8(
+            bytes[sizeof_string_length..string_length as usize + sizeof_string_length].to_vec(),
+        )
+        .ok()
+    }
+
+    fn size_from_bytes(bytes: &[u8]) -> Option<usize> {
+        let string_length = Varint::from_bytes(bytes)?.to_i32();
+        if string_length < 1 {
+            return None;
+        }
+
+        let sizeof_string_length = Varint::size_from_int32(string_length);
+
+        Some(string_length as usize + sizeof_string_length)
+    }
+
+    fn size_as_bytes(&self) -> usize {
+        self.len()
+    }
+
+    fn as_bytes(&self) -> &[u8] {
+        self.as_bytes()
+    }
+
+    const SIZE_TO_READ: usize = 5;
+}
+
 #[cfg(test)]
 mod tests {
     mod varint {
         use super::super::*;
 
+        #[test]
+        fn create_a_lot_of_varints() {
+            for i in 0..=1000000 {
+                Varint::from_i32(i);
+            }
+        }
+
         /// values from https://wiki.vg/index.php?title=Protocol&oldid=7368#VarInt_and_VarLong
         #[test]
         fn test_from_i32() {
+            assert_eq!(Varint::size_from_int32(127), 1);
+            assert_eq!(Varint::size_from_int32(128), 2);
+            assert_eq!(Varint::size_from_int32(2097151), 3);
+            assert_eq!(Varint::size_from_int32(2147483647), 5);
+            assert_eq!(Varint::size_from_int32(-1), 5);
+
             let mut varint = Varint::from_i32(127);
             assert_eq!(varint.bytes, vec![0x7f]);
 
@@ -223,7 +311,7 @@ mod tests {
                 let bytes = $vec;
                 let size = Varint::size_from_bytes(&bytes).unwrap();
                 let varint = Varint::from_bytes(&bytes).unwrap();
-                assert_eq!(varint.bytes, vec![0x7f]);
+                assert_eq!(varint.bytes, bytes);
                 assert_eq!(varint.bytes.len(), size);
             };
         }
@@ -245,6 +333,22 @@ mod tests {
 
             let bad_varint = Varint::from_bytes(&vec![0xff, 0xff, 0xff, 0xff, 0xff, 0x0f]);
             assert!(bad_varint.is_none());
+        }
+    }
+
+    mod string {
+        use super::super::*;
+
+        #[test]
+        fn test_from_bytes() {
+            let string =
+                NetworkString::from_bytes(String::from("\x0bhello there").as_bytes()).unwrap();
+
+            assert_eq!(string, "hello there");
+
+            let string = NetworkString::from_bytes(String::from("\x02§").as_bytes()).unwrap();
+
+            assert_eq!(string, "§");
         }
     }
 }

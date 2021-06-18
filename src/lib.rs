@@ -1,7 +1,9 @@
-use std::io::{prelude::*, BufReader};
+use std::io::{prelude::*, BufReader, BufWriter};
 
-mod network_types;
+mod network;
 
-use network_types::NetworkTypeProducer;
+use network::types::{NetworkTypeReader, NetworkTypeWriter, Varint};
 
-impl<R: Read> NetworkTypeProducer for BufReader<R> {}
+impl<R: Read> NetworkTypeReader for BufReader<R> {}
+
+impl<W: Write> NetworkTypeWriter for BufWriter<W> {}
