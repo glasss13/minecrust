@@ -2,6 +2,9 @@
 //! A full list of the types can be found at <https://wiki.vg/index.php?title=Protocol&oldid=7368#Data_types>.
 //!
 //! Every type that is going to be received or sent should implement the [`NetworkType`] trait.
+
+use std::convert::TryInto;
+
 /// A trait that can be implemented on a [`BufRead`] to consume it and construct a [`NetworkType`].
 ///
 /// [`BufRead`]: std::io::BufRead
@@ -24,6 +27,24 @@ where
 
         Some(result)
     }
+
+    /// Creates a network type by consuming from a [`std::io::BufRead`] but is different from `read_network_type` in that you can specify a size.
+    ///
+    /// This is useful for data types where the size is context dependant.
+    ///
+    /// The `NetworkType` in question's `from_bytes` function must use the length of the passed slice as the context-defined length.
+    ///
+    /// # Panics
+    ///
+    /// This function will panic if the underlying reader was read, but returned an error.
+    fn read_network_type_with_size<T: NetworkType>(&mut self, size: usize) -> Option<T> {
+        let bytes = self.fill_buf().expect("Reached end of stream.");
+
+        let result = T::from_bytes(&bytes[0..size])?;
+        self.consume(size);
+
+        Some(result)
+    }
 }
 
 pub(crate) trait NetworkTypeWriter
@@ -32,7 +53,6 @@ where
 {
     fn write_network_type<T: NetworkType>(&mut self, network_type: &T) -> std::io::Result<()> {
         self.write_all(network_type.as_bytes())?;
-        self.flush()?;
 
         Ok(())
     }
@@ -101,11 +121,11 @@ impl NetworkType for Varint {
         self.bytes.len()
     }
 
-    const SIZE_TO_READ: usize = 5;
-
     fn as_bytes(&self) -> &[u8] {
         &self.bytes
     }
+
+    const SIZE_TO_READ: usize = 5;
 }
 
 impl Varint
@@ -117,13 +137,17 @@ where
         Varint { bytes: Vec::new() }
     }
 
+    pub(crate) fn own_bytes(self) -> Vec<u8> {
+        self.bytes
+    }
+
     /// Constructs a new `Varint` from `num`.
     pub(crate) fn from_i32(num: i32) -> Varint {
         let mut input = num;
         let mut temp_out_array = [0u8; 5];
-        let mut array_pos = 0;
+        let mut output = Vec::with_capacity(5);
 
-        while input != 0 {
+        for i in 0..5 {
             let mut temp_byte = (input & 0b01111111) as u8;
             // Convert to unsigned to enforce logical bit shift
             input = (input as u32 >> 7) as i32;
@@ -132,15 +156,18 @@ where
                 temp_byte |= 0b10000000;
             }
 
-            temp_out_array[array_pos] = temp_byte;
+            output.push(temp_byte);
 
-            array_pos += 1;
+            temp_out_array[i] = temp_byte;
+
+            // array_pos += 1;
+
+            if input == 0 {
+                break;
+            }
         }
 
-        let mut out_vec = Vec::with_capacity(array_pos);
-        out_vec.extend_from_slice(&temp_out_array[0..array_pos]);
-
-        Varint { bytes: out_vec }
+        Varint { bytes: output }
     }
 
     /// Gets the value of the `Varint` as an `i32`.
@@ -188,33 +215,56 @@ where
 }
 
 /// UTF-8 string prefixed with its size in bytes as a VarInt.
-pub type NetworkString = String;
+///
+/// <https://wiki.vg/index.php?title=Protocol&oldid=7368#Data_types>.
+#[derive(Debug)]
+pub(crate) struct NetworkString {
+    bytes: Vec<u8>,
+}
+
+impl NetworkString {
+    pub(crate) fn from_string(string: &str) -> NetworkString {
+        let str_bytes = string.as_bytes();
+
+        let mut length_varint_bytes = Varint::from_i32(string.len() as i32).as_bytes().to_vec();
+
+        length_varint_bytes.extend_from_slice(str_bytes);
+
+        NetworkString {
+            bytes: length_varint_bytes,
+        }
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        Varint::from_bytes(&self.bytes).unwrap().to_i32() as usize
+    }
+
+    pub(crate) fn to_string(&self) -> String {
+        String::from_utf8(self.string_bytes().to_vec()).unwrap()
+    }
+
+    fn string_bytes(&self) -> &[u8] {
+        let offset = Varint::size_from_bytes(&self.bytes).unwrap();
+        &self.bytes[offset..]
+    }
+}
 
 impl NetworkType for NetworkString {
     fn from_bytes(bytes: &[u8]) -> Option<Self> {
         let string_length_varint = Varint::from_bytes(bytes)?;
         let string_length = string_length_varint.to_i32();
-        if string_length < 1 {
-            return None;
-        }
 
         let sizeof_string_length = string_length_varint.as_bytes().len();
 
-        if bytes.len() < string_length as usize + sizeof_string_length {
-            return None;
-        }
-
-        String::from_utf8(
-            bytes[sizeof_string_length..string_length as usize + sizeof_string_length].to_vec(),
-        )
-        .ok()
+        Some(NetworkString {
+            bytes: bytes
+                .get(..string_length as usize + sizeof_string_length)?
+                .to_vec(),
+        })
     }
 
     fn size_from_bytes(bytes: &[u8]) -> Option<usize> {
         let string_length = Varint::from_bytes(bytes)?.to_i32();
-        if string_length < 1 {
-            return None;
-        }
 
         let sizeof_string_length = Varint::size_from_int32(string_length);
 
@@ -222,27 +272,100 @@ impl NetworkType for NetworkString {
     }
 
     fn size_as_bytes(&self) -> usize {
-        self.len()
+        self.bytes.len()
     }
 
     fn as_bytes(&self) -> &[u8] {
-        self.as_bytes()
+        &self.bytes
     }
 
     const SIZE_TO_READ: usize = 5;
+}
+
+/// An integer between 0 and 65535.
+///
+/// Internally represents itself as a big endian array of two bytes. Returns and expects all byte arrays to be big endian.
+///
+/// <https://wiki.vg/index.php?title=Protocol&oldid=7368#Data_types>.
+pub(crate) struct UnsignedShort {
+    bytes: [u8; 2],
+}
+
+impl UnsignedShort {
+    pub(crate) fn from_u16(val: u16) -> UnsignedShort {
+        UnsignedShort {
+            bytes: val.to_be_bytes(),
+        }
+    }
+}
+
+impl NetworkType for UnsignedShort {
+    /// `bytes` must be big endian.
+    fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        if let Some(_) = UnsignedShort::size_from_bytes(bytes) {
+            Some(UnsignedShort {
+                bytes: bytes.try_into().ok()?,
+            })
+        } else {
+            None
+        }
+    }
+
+    fn size_from_bytes(bytes: &[u8]) -> Option<usize> {
+        if bytes.len() < 2 {
+            None
+        } else {
+            Some(2)
+        }
+    }
+
+    fn size_as_bytes(&self) -> usize {
+        2
+    }
+
+    fn as_bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    const SIZE_TO_READ: usize = 2;
+}
+
+/// This is just a sequence of zero or more bytes, its meaning should be explained somewhere else, e.g. in the packet description. The length must also be known from the context.
+///
+/// <https://wiki.vg/index.php?title=Protocol&oldid=7368#Data_types>.
+#[derive(Debug)]
+pub(crate) struct ByteArray {
+    bytes: Vec<u8>,
+}
+
+impl NetworkType for ByteArray {
+    /// expects `bytes` to encode the length.
+    fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        Some(ByteArray {
+            bytes: bytes.to_vec(),
+        })
+    }
+
+    fn size_from_bytes(bytes: &[u8]) -> Option<usize> {
+        Some(bytes.len())
+    }
+
+    fn size_as_bytes(&self) -> usize {
+        self.bytes.len()
+    }
+
+    fn as_bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    /// context dependant
+    const SIZE_TO_READ: usize = 0;
 }
 
 #[cfg(test)]
 mod tests {
     mod varint {
         use super::super::*;
-
-        #[test]
-        fn create_a_lot_of_varints() {
-            for i in 0..=1000000 {
-                Varint::from_i32(i);
-            }
-        }
 
         /// values from https://wiki.vg/index.php?title=Protocol&oldid=7368#VarInt_and_VarLong
         #[test]
@@ -253,19 +376,22 @@ mod tests {
             assert_eq!(Varint::size_from_int32(2147483647), 5);
             assert_eq!(Varint::size_from_int32(-1), 5);
 
-            let mut varint = Varint::from_i32(127);
+            let varint = Varint::from_i32(0);
+            assert_eq!(varint.bytes, vec![0]);
+
+            let varint = Varint::from_i32(127);
             assert_eq!(varint.bytes, vec![0x7f]);
 
-            varint = Varint::from_i32(128);
+            let varint = Varint::from_i32(128);
             assert_eq!(varint.bytes, vec![0x80, 0x01]);
 
-            varint = Varint::from_i32(2097151);
+            let varint = Varint::from_i32(2097151);
             assert_eq!(varint.bytes, vec![0xff, 0xff, 0x7f]);
 
-            varint = Varint::from_i32(2147483647);
+            let varint = Varint::from_i32(2147483647);
             assert_eq!(varint.bytes, vec![0xff, 0xff, 0xff, 0xff, 0x07]);
 
-            varint = Varint::from_i32(-1);
+            let varint = Varint::from_i32(-1);
             assert_eq!(varint.bytes, vec![0xff, 0xff, 0xff, 0xff, 0x0f]);
         }
 
@@ -340,15 +466,18 @@ mod tests {
         use super::super::*;
 
         #[test]
-        fn test_from_bytes() {
+        fn test_construct() {
             let string =
                 NetworkString::from_bytes(String::from("\x0bhello there").as_bytes()).unwrap();
 
-            assert_eq!(string, "hello there");
+            assert_eq!(string.bytes, b"\x0bhello there");
 
             let string = NetworkString::from_bytes(String::from("\x02§").as_bytes()).unwrap();
 
-            assert_eq!(string, "§");
+            assert_eq!(string.bytes, "\x02§".as_bytes());
+
+            let string = NetworkString::from_string("hello there");
+            assert_eq!(string.as_bytes(), b"\x0bhello there");
         }
     }
 }
