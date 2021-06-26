@@ -7,7 +7,6 @@ type AesCfb8 = Cfb8<Aes128>;
 use rand::{self, Rng};
 use sha1::Sha1;
 use std::fmt::Write;
-use ureq;
 
 use super::types::{
     ByteArray, NetworkString, NetworkType, NetworkTypeReader, NetworkTypeWriter, UnsignedShort,
@@ -117,17 +116,18 @@ fn mc_hex_digest(to_digest_list: &[&[u8]]) -> Option<String> {
         let mut carry = true;
 
         for i in (0..hash_bytes.len()).rev() {
-            hash_bytes[i] = !hash_bytes[i] & 0xff;
+            hash_bytes[i] = !hash_bytes[i];
             if carry {
                 carry = hash_bytes[i] == 0xff;
-                hash_bytes[i] = hash_bytes[i] + 1;
+                hash_bytes[i] += 1;
             }
         }
     }
 
-    for i in 0..hash_bytes.len() {
-        write!(&mut hash_string, "{:02x}", hash_bytes[i]).ok()?;
+    for byte in &hash_bytes {
+        write!(&mut hash_string, "{:02x}", byte).ok()?;
     }
+
     // get rid of leading zero's since the array is meant to be one large integer.
     let hash_string = hash_string.trim_matches('0').to_owned();
 
@@ -226,7 +226,7 @@ impl ClientBoundPacket {
                 cipher_decrypt.decrypt(&mut to_encrypt);
 
                 println!(
-                    "the unencryped data is {}",
+                    "the unencrypted data is {}",
                     String::from_utf8(to_encrypt).unwrap()
                 );
             }
@@ -264,7 +264,7 @@ pub(crate) enum ConnectionState {
 }
 
 impl ConnectionState {
-    pub(crate) fn to_varint(&self) -> Varint {
-        Varint::from_i32(*self as i32)
+    pub(crate) fn to_varint(self) -> Varint {
+        Varint::from_i32(self as i32)
     }
 }

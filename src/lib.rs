@@ -13,7 +13,7 @@ pub struct Client {
     /// non-hyphenated
     uuid: String,
     authenticated: bool,
-    connectred_to_server: bool,
+    connected_to_server: bool,
 }
 
 #[doc(hidden)]

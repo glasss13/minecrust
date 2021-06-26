@@ -108,10 +108,8 @@ impl NetworkType for Varint {
 
     fn size_from_bytes(bytes: &[u8]) -> Option<usize> {
         for i in 0..Self::SIZE_TO_READ {
-            if bytes.get(i)? & 0b10000000 == 0 {
-                if Varint::bytes_are_valid_varint(&bytes[0..=i]) {
-                    return Some(i + 1);
-                }
+            if bytes.get(i)? & 0b10000000 == 0 && Varint::bytes_are_valid_varint(&bytes[0..=i]) {
+                return Some(i + 1);
             }
         }
         None
@@ -147,7 +145,7 @@ where
         let mut temp_out_array = [0u8; 5];
         let mut output = Vec::with_capacity(5);
 
-        for i in 0..5 {
+        for byte in &mut temp_out_array {
             let mut temp_byte = (input & 0b01111111) as u8;
             // Convert to unsigned to enforce logical bit shift
             input = (input as u32 >> 7) as i32;
@@ -158,7 +156,7 @@ where
 
             output.push(temp_byte);
 
-            temp_out_array[i] = temp_byte;
+            *byte = temp_byte;
 
             // array_pos += 1;
 
@@ -196,12 +194,12 @@ where
 
     /// Checks encoding of bytes for proper `Varint`.
     fn bytes_are_valid_varint(buffer: &[u8]) -> bool {
-        if buffer.len() < 1 || buffer.len() > 5 {
+        if buffer.is_empty() || buffer.len() > 5 {
             return false;
         }
 
-        for i in 0..buffer.len() - 1 {
-            if buffer[i] & 0b10000000 == 0 {
+        for byte in buffer.iter().take(buffer.len() - 1) {
+            if byte & 0b10000000 == 0 {
                 return false;
             }
         }
@@ -239,13 +237,19 @@ impl NetworkString {
         Varint::from_bytes(&self.bytes).unwrap().to_i32() as usize
     }
 
-    pub(crate) fn to_string(&self) -> String {
-        String::from_utf8(self.string_bytes().to_vec()).unwrap()
-    }
-
     fn string_bytes(&self) -> &[u8] {
         let offset = Varint::size_from_bytes(&self.bytes).unwrap();
         &self.bytes[offset..]
+    }
+}
+
+impl std::fmt::Display for NetworkString {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}",
+            String::from_utf8(self.string_bytes().to_vec()).unwrap()
+        )
     }
 }
 
@@ -302,7 +306,7 @@ impl UnsignedShort {
 impl NetworkType for UnsignedShort {
     /// `bytes` must be big endian.
     fn from_bytes(bytes: &[u8]) -> Option<Self> {
-        if let Some(_) = UnsignedShort::size_from_bytes(bytes) {
+        if UnsignedShort::size_from_bytes(bytes).is_some() {
             Some(UnsignedShort {
                 bytes: bytes.try_into().ok()?,
             })
@@ -415,21 +419,21 @@ mod tests {
 
         #[test]
         fn test_valid_varint() {
-            assert!(Varint::bytes_are_valid_varint(&vec![0x7f]));
-            assert!(Varint::bytes_are_valid_varint(&vec![0x80, 0x01]));
-            assert!(Varint::bytes_are_valid_varint(&vec![0xff, 0xff, 0x7f]));
-            assert!(Varint::bytes_are_valid_varint(&vec![
+            assert!(Varint::bytes_are_valid_varint(&[0x7f]));
+            assert!(Varint::bytes_are_valid_varint(&[0x80, 0x01]));
+            assert!(Varint::bytes_are_valid_varint(&[0xff, 0xff, 0x7f]));
+            assert!(Varint::bytes_are_valid_varint(&[
                 0xff, 0xff, 0xff, 0xff, 0x07
             ]));
-            assert!(Varint::bytes_are_valid_varint(&vec![
+            assert!(Varint::bytes_are_valid_varint(&[
                 0xff, 0xff, 0xff, 0xff, 0x0f
             ]));
 
-            assert!(!Varint::bytes_are_valid_varint(&vec![]));
-            assert!(!Varint::bytes_are_valid_varint(&vec![
+            assert!(!Varint::bytes_are_valid_varint(&[]));
+            assert!(!Varint::bytes_are_valid_varint(&[
                 0xff, 0xff, 0xff, 0xff, 0xff, 0x0f
             ]));
-            assert!(!Varint::bytes_are_valid_varint(&vec![0xff, 0xff]));
+            assert!(!Varint::bytes_are_valid_varint(&[0xff, 0xff]));
         }
 
         macro_rules! test_from_bytes_vec {
@@ -448,16 +452,16 @@ mod tests {
 
             test_from_bytes_vec!(vec![0xff, 0xff, 0xff, 0xff, 0x0f]);
 
-            let varint = Varint::from_bytes(&vec![0xff, 0xff, 0xff, 0xff, 0x0f, 0x0f]).unwrap();
+            let varint = Varint::from_bytes(&[0xff, 0xff, 0xff, 0xff, 0x0f, 0x0f]).unwrap();
             assert_eq!(varint.bytes, vec![0xff, 0xff, 0xff, 0xff, 0x0f]);
 
-            let bad_varint = Varint::from_bytes(&vec![0xff]);
+            let bad_varint = Varint::from_bytes(&[0xff]);
             assert!(bad_varint.is_none());
 
-            let bad_varint = Varint::from_bytes(&vec![0xff, 0xff, 0xff, 0xff, 0xff]);
+            let bad_varint = Varint::from_bytes(&[0xff, 0xff, 0xff, 0xff, 0xff]);
             assert!(bad_varint.is_none());
 
-            let bad_varint = Varint::from_bytes(&vec![0xff, 0xff, 0xff, 0xff, 0xff, 0x0f]);
+            let bad_varint = Varint::from_bytes(&[0xff, 0xff, 0xff, 0xff, 0xff, 0x0f]);
             assert!(bad_varint.is_none());
         }
     }
