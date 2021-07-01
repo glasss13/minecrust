@@ -8,10 +8,8 @@ use rand::{self, Rng};
 use sha1::Sha1;
 use std::fmt::Write;
 
-use super::types::{
-    ByteArray, NetworkString, NetworkType, NetworkTypeReader, NetworkTypeWriter, UnsignedShort,
-    Varint,
-};
+use super::connection::Connection;
+use super::types::{ByteArray, NetworkString, NetworkType, UnsignedShort, Varint};
 
 pub(crate) trait Packet {
     fn packet_id(&self) -> u8;
@@ -48,7 +46,7 @@ impl Packet for ServerBoundPacket {
 }
 
 impl ServerBoundPacket {
-    pub(crate) fn send<W: NetworkTypeWriter>(&self, writer: &mut W) -> Result<(), std::io::Error> {
+    pub(crate) async fn send(&self, connection: &mut Connection) {
         let encoded_packet_id = Varint::from_i32(self.packet_id().into());
 
         match self {
@@ -64,24 +62,38 @@ impl ServerBoundPacket {
                     + next_state.size_as_bytes()
                     + encoded_packet_id.size_as_bytes();
 
-                writer.write_network_type(&Varint::from_i32(len as i32))?;
-                writer.write_network_type(&encoded_packet_id)?;
-                writer.write_network_type(protocol_version)?;
-                writer.write_network_type(server_address)?;
-                writer.write_network_type(server_port)?;
-                writer.write_network_type(next_state)?;
-                writer.flush()?;
+                assert!(
+                    next_state.to_i32() == ConnectionState::Login as i32
+                        || next_state.to_i32() == ConnectionState::Status as i32
+                );
+
+                connection
+                    .write_network_type(&Varint::from_i32(len as i32))
+                    .await;
+                connection.write_network_type(&encoded_packet_id).await;
+                connection.write_network_type(protocol_version).await;
+                connection.write_network_type(server_address).await;
+                connection.write_network_type(server_port).await;
+                connection.write_network_type(next_state).await;
+                connection.flush_writer().await.unwrap();
+
+                connection.set_connection_state(match next_state.to_i32() {
+                    1 => ConnectionState::Status,
+                    2 => ConnectionState::Login,
+                    _ => unreachable!(),
+                });
             }
             ServerBoundPacket::LoginStart { username } => {
                 let len = username.size_as_bytes() + encoded_packet_id.size_as_bytes();
 
-                writer.write_network_type(&Varint::from_i32(len as i32))?;
-                writer.write_network_type(&encoded_packet_id)?;
-                writer.write_network_type(username)?;
-                writer.flush()?;
+                connection
+                    .write_network_type(&Varint::from_i32(len as i32))
+                    .await;
+                connection.write_network_type(&encoded_packet_id).await;
+                connection.write_network_type(username).await;
+                connection.flush_writer().await.unwrap();
             }
         }
-        Ok(())
     }
 }
 
@@ -100,6 +112,120 @@ pub(crate) enum ClientBoundPacket {
         uuid: NetworkString,
         username: NetworkString,
     },
+}
+
+impl ClientBoundPacket {
+    pub(crate) async fn from_connection(connection: &mut Connection) -> ClientBoundPacket {
+        let packet_length = connection
+            .read_network_type::<Varint>()
+            .await
+            .unwrap()
+            .to_i32();
+        let packet_id = connection
+            .read_network_type::<Varint>()
+            .await
+            .unwrap()
+            .to_i32();
+
+        match connection.connection_state() {
+            ConnectionState::Handshaking => unreachable!(),
+            ConnectionState::Play => todo!(),
+            ConnectionState::Status => todo!(),
+            ConnectionState::Login => match packet_id {
+                0x01 => {
+                    let server_id = connection
+                        .read_network_type::<NetworkString>()
+                        .await
+                        .unwrap();
+                    let public_key_length = connection.read_network_type::<Varint>().await.unwrap();
+                    let public_key = connection
+                        .read_network_type_with_size::<ByteArray>(
+                            public_key_length.to_i32() as usize
+                        )
+                        .await
+                        .unwrap();
+                    let verify_token_length =
+                        connection.read_network_type::<Varint>().await.unwrap();
+                    let verify_token = connection
+                        .read_network_type_with_size::<ByteArray>(
+                            verify_token_length.to_i32() as usize
+                        )
+                        .await
+                        .unwrap();
+
+                    ClientBoundPacket::EncryptionRequest {
+                        server_id,
+                        public_key_length,
+                        public_key,
+                        verify_token_length,
+                        verify_token,
+                    }
+                }
+                0x02 => {
+                    let uuid = connection
+                        .read_network_type::<NetworkString>()
+                        .await
+                        .unwrap();
+                    let username = connection
+                        .read_network_type::<NetworkString>()
+                        .await
+                        .unwrap();
+
+                    ClientBoundPacket::LoginSuccess { uuid, username }
+                }
+                _ => todo!(),
+            },
+        }
+    }
+
+    pub(crate) fn process(&self) {
+        match self {
+            ClientBoundPacket::EncryptionRequest {
+                server_id: _,
+                public_key_length,
+                public_key,
+                verify_token_length,
+                verify_token,
+            } => {
+                println!("Enabling encryption...");
+                let shared_secret: [u8; 16] = rand::thread_rng().gen();
+                let server_hash_string =
+                    mc_hex_digest(&[&shared_secret, public_key.as_bytes()]).unwrap();
+
+                println!("server hash: {}", server_hash_string);
+
+                println!(
+                    "public_key_length: {} public_key length {}",
+                    public_key_length.to_i32(),
+                    public_key.as_bytes().len()
+                );
+
+                let mut cipher_encrypt = AesCfb8::new_from_slices(&shared_secret, &shared_secret)
+                    .expect("something went wrong");
+
+                let mut cipher_decrypt = AesCfb8::new_from_slices(&shared_secret, &shared_secret)
+                    .expect("something went wrong");
+
+                let to_encrypt_string = String::from("yawmadah");
+
+                let mut to_encrypt = to_encrypt_string.into_bytes();
+
+                cipher_encrypt.encrypt(&mut to_encrypt);
+
+                cipher_decrypt.decrypt(&mut to_encrypt);
+
+                println!(
+                    "the unencrypted data is {}",
+                    String::from_utf8(to_encrypt).unwrap()
+                );
+            }
+            ClientBoundPacket::LoginSuccess { uuid, username } => println!(
+                "{} logged on with UUID {}",
+                username.to_string(),
+                uuid.to_string()
+            ),
+        }
+    }
 }
 
 fn mc_hex_digest(to_digest_list: &[&[u8]]) -> Option<String> {
@@ -135,108 +261,6 @@ fn mc_hex_digest(to_digest_list: &[&[u8]]) -> Option<String> {
         return Some(format!("-{}", hash_string));
     }
     Some(hash_string)
-}
-
-impl ClientBoundPacket {
-    pub(crate) fn from_reader<R: NetworkTypeReader>(
-        packet_length: i32,
-        packet_id: i32,
-        reader: &mut R,
-        connection_state: ConnectionState,
-    ) -> Option<ClientBoundPacket> {
-        match connection_state {
-            ConnectionState::Handshaking => unreachable!(),
-            ConnectionState::Play => todo!(),
-            ConnectionState::Status => todo!(),
-            ConnectionState::Login => match packet_id {
-                0x01 => {
-                    let server_id = reader.read_network_type::<NetworkString>()?;
-                    let public_key_length = reader.read_network_type::<Varint>()?;
-                    let public_key = reader.read_network_type_with_size::<ByteArray>(
-                        public_key_length.to_i32() as usize,
-                    )?;
-                    let verify_token_length = reader.read_network_type::<Varint>()?;
-                    let verify_token = reader.read_network_type_with_size::<ByteArray>(
-                        verify_token_length.to_i32() as usize,
-                    )?;
-
-                    Some(ClientBoundPacket::EncryptionRequest {
-                        server_id,
-                        public_key_length,
-                        public_key,
-                        verify_token_length,
-                        verify_token,
-                    })
-                }
-                0x02 => Some(ClientBoundPacket::LoginSuccess {
-                    uuid: reader.read_network_type::<NetworkString>()?,
-                    username: reader.read_network_type::<NetworkString>()?,
-                }),
-                _ => todo!(),
-            },
-        }
-    }
-
-    pub(crate) fn process(&self) {
-        match self {
-            ClientBoundPacket::EncryptionRequest {
-                server_id: _,
-                public_key_length,
-                public_key,
-                verify_token_length,
-                verify_token,
-            } => {
-                println!("Enabling encryption...");
-                let shared_secret: [u8; 16] = rand::thread_rng().gen();
-                let server_hash_string =
-                    mc_hex_digest(&[&shared_secret, public_key.as_bytes()]).unwrap();
-
-                println!("server hash: {}", server_hash_string);
-
-                let access_token = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJjNzdkYWI5NzNlYzA0OTlmYmQ0MWQxODRjODMyNzZjNiIsInlnZ3QiOiIxOGVjOGU2Nzc0YWE0MTRlYTJkNmVkMzY3NTIwMzA2MSIsInNwciI6IjQ4Y2U4Mjg5MDU4NTRiNzRiNTE1ZTUyMDdmZDAwOWI0IiwiaXNzIjoiWWdnZHJhc2lsLUF1dGgiLCJleHAiOjE2MjQ1NTgyNjIsImlhdCI6MTYyNDM4NTQ2Mn0.bZJMM7ofR4k3LmFsQOKG_ZDmA61pMnB-qdP8jiOmpN4";
-                let uuid = "48ce828905854b74b515e5207fd009b4";
-
-                let response =
-                    ureq::post("https://sessionserver.mojang.com/session/minecraft/join")
-                        .send_json(ureq::json!({
-                            "accessToken": access_token,
-                            "selectedProfile": uuid,
-                            "serverId": server_hash_string
-                        }))
-                        .unwrap();
-
-                println!(
-                    "public_key_length: {} public_key length {}",
-                    public_key_length.to_i32(),
-                    public_key.as_bytes().len()
-                );
-
-                let mut cipher_encrypt = AesCfb8::new_from_slices(&shared_secret, &shared_secret)
-                    .expect("something went wrong");
-
-                let mut cipher_decrypt = AesCfb8::new_from_slices(&shared_secret, &shared_secret)
-                    .expect("something went wrong");
-
-                let to_encrypt_string = String::from("yawmadah");
-
-                let mut to_encrypt = to_encrypt_string.into_bytes();
-
-                cipher_encrypt.encrypt(&mut to_encrypt);
-
-                cipher_decrypt.decrypt(&mut to_encrypt);
-
-                println!(
-                    "the unencrypted data is {}",
-                    String::from_utf8(to_encrypt).unwrap()
-                );
-            }
-            ClientBoundPacket::LoginSuccess { uuid, username } => println!(
-                "{} logged on with UUID {}",
-                username.to_string(),
-                uuid.to_string()
-            ),
-        }
-    }
 }
 
 impl Packet for ClientBoundPacket {

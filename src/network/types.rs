@@ -5,59 +5,6 @@
 
 use std::convert::TryInto;
 
-/// A trait that can be implemented on a [`BufRead`] to consume it and construct a [`NetworkType`].
-///
-/// [`BufRead`]: std::io::BufRead
-pub(crate) trait NetworkTypeReader
-where
-    Self: std::io::BufRead,
-{
-    /// Creates a network type by consuming from a [`std::io::BufRead`].
-    ///
-    /// # Panics
-    ///
-    /// This function will panic if the underlying reader was read, but returned an error.
-    fn read_network_type<T: NetworkType>(&mut self) -> Option<T> {
-        let bytes = self.fill_buf().expect("Reached end of stream.");
-
-        let size_to_consume = T::size_from_bytes(bytes)?;
-
-        let result = T::from_bytes(bytes)?;
-        self.consume(size_to_consume);
-
-        Some(result)
-    }
-
-    /// Creates a network type by consuming from a [`std::io::BufRead`] but is different from `read_network_type` in that you can specify a size.
-    ///
-    /// This is useful for data types where the size is context dependant.
-    ///
-    /// The `NetworkType` in question's `from_bytes` function must use the length of the passed slice as the context-defined length.
-    ///
-    /// # Panics
-    ///
-    /// This function will panic if the underlying reader was read, but returned an error.
-    fn read_network_type_with_size<T: NetworkType>(&mut self, size: usize) -> Option<T> {
-        let bytes = self.fill_buf().expect("Reached end of stream.");
-
-        let result = T::from_bytes(&bytes[0..size])?;
-        self.consume(size);
-
-        Some(result)
-    }
-}
-
-pub(crate) trait NetworkTypeWriter
-where
-    Self: std::io::Write,
-{
-    fn write_network_type<T: NetworkType>(&mut self, network_type: &T) -> std::io::Result<()> {
-        self.write_all(network_type.as_bytes())?;
-
-        Ok(())
-    }
-}
-
 /// Types that are used in the [Minecraft network protocol](https://wiki.vg/index.php?title=Protocol&oldid=7368).
 pub(crate) trait NetworkType: Sized {
     /// Constructs the [`NetworkType`] from a collection of bytes.

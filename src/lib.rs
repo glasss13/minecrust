@@ -1,17 +1,17 @@
-use std::io::{prelude::*, BufReader, BufWriter};
+use std::error::Error;
 use std::marker::PhantomData;
+
+use hyper::body::HttpBody;
+use serde_json::{json, Value};
 
 mod network;
 
-use network::types::{NetworkTypeReader, NetworkTypeWriter};
-
-impl<R: Read> NetworkTypeReader for BufReader<R> {}
-impl<W: Write> NetworkTypeWriter for BufWriter<W> {}
-
+#[derive(Debug)]
 pub struct Client {
     username: String,
     /// non-hyphenated
     uuid: String,
+    access_token: Option<String>,
     authenticated: bool,
     connected_to_server: bool,
 }
@@ -23,7 +23,7 @@ pub struct Set;
 /// Used in [ClientBuilder] as generic flags
 pub struct Unset;
 pub struct ClientBuilder<IpSet, PasswordSet> {
-    username: String,
+    mojang_account_name: String,
     port: u16,
 
     ip: Option<String>,
@@ -34,9 +34,9 @@ pub struct ClientBuilder<IpSet, PasswordSet> {
 }
 
 impl ClientBuilder<Unset, Unset> {
-    pub fn new<S: Into<String>>(username: S) -> ClientBuilder<Unset, Unset> {
+    pub fn new<S: Into<String>>(mojang_account_name: S) -> ClientBuilder<Unset, Unset> {
         ClientBuilder {
-            username: username.into(),
+            mojang_account_name: mojang_account_name.into(),
             ip: None,
             port: 25565,
             password: None,
@@ -49,7 +49,7 @@ impl ClientBuilder<Unset, Unset> {
 impl<IpSet, PasswordSet> ClientBuilder<IpSet, PasswordSet> {
     pub fn ip<S: Into<String>>(self, ip: S) -> ClientBuilder<Set, PasswordSet> {
         ClientBuilder {
-            username: self.username,
+            mojang_account_name: self.mojang_account_name,
             port: self.port,
             ip: Some(ip.into()),
             password: self.password,
@@ -64,7 +64,7 @@ impl<IpSet, PasswordSet> ClientBuilder<IpSet, PasswordSet> {
 
     pub fn password<S: Into<String>>(self, password: S) -> ClientBuilder<IpSet, Set> {
         ClientBuilder {
-            username: self.username,
+            mojang_account_name: self.mojang_account_name,
             port: self.port,
             ip: self.ip,
             password: Some(password.into()),
@@ -75,7 +75,7 @@ impl<IpSet, PasswordSet> ClientBuilder<IpSet, PasswordSet> {
 }
 
 impl<PasswordSet> ClientBuilder<Set, PasswordSet> {
-    pub fn join_unauth(self) -> Client {
+    pub async fn join_unauth(self) -> Client {
         todo!()
     }
 }
@@ -85,7 +85,36 @@ impl ClientBuilder<Set, Set> {
         todo!()
     }
 
-    pub fn authenticate(self) -> Client {
-        todo!()
+    pub async fn authenticate(self) -> Result<Client, Box<dyn Error>> {
+        let client =
+            hyper::Client::builder().build::<_, hyper::Body>(hyper_tls::HttpsConnector::new());
+
+        let req = hyper::Request::builder()
+            .method("POST")
+            .uri("https://authserver.mojang.com/authenticate")
+            .body(hyper::Body::from(
+                json!({
+                    "agent": {
+                        "name": "Minecraft",
+                        "version": 1
+                    },
+                    "username": self.mojang_account_name,
+                    "password": self.password
+                })
+                .to_string(),
+            ))?;
+
+        let mut resp = client.request(req).await?;
+
+        let body: Value = serde_json::from_slice(&resp.body_mut().data().await.unwrap().unwrap())?;
+        let selected_profile = &body["selectedProfile"];
+
+        Ok(Client {
+            username: selected_profile["name"].as_str().unwrap().to_string(),
+            uuid: selected_profile["id"].as_str().unwrap().to_string(),
+            access_token: Some(body["accessToken"].as_str().unwrap().to_string()),
+            authenticated: true,
+            connected_to_server: false,
+        })
     }
 }
