@@ -3,14 +3,15 @@
 //!
 //! Every type that is going to be received or sent should implement the [`NetworkType`] trait.
 
-use std::convert::TryInto;
+use std::io::{Error, ErrorKind};
 
 /// Types that are used in the [Minecraft network protocol](https://wiki.vg/index.php?title=Protocol&oldid=7368).
 pub(crate) trait NetworkType: Sized {
     /// Constructs the [`NetworkType`] from a collection of bytes.
     ///
-    /// Returns [`None`] if the bytes don't encode the [`NetworkType`] properly.
-    fn from_bytes(bytes: &[u8]) -> Option<Self>;
+    /// # Errors
+    /// This function will return an error if `bytes` does not properly encode the `NetworkType`
+    fn from_bytes(bytes: &[u8]) -> Result<Self, Error>;
 
     /// Gets the size of the raw data of the [`NetworkType`] from a collection of bytes.
     ///
@@ -18,10 +19,11 @@ pub(crate) trait NetworkType: Sized {
     ///
     /// Often can be called with slices of length [`SIZE_TO_READ`]
     ///
-    /// Returns [`None`] if the [`NetworkType`] is not encoded in the collection.
+    /// # Errors
+    /// This function will return an error if `bytes` does not properly encode the `NetworkType`
     ///
     /// [`SIZE_TO_READ`]: NetworkType::SIZE_TO_READ
-    fn size_from_bytes(bytes: &[u8]) -> Option<usize>;
+    fn size_from_bytes(bytes: &[u8]) -> Result<usize, Error>;
 
     /// Size of the [`NetworkType`] when represented as a pure stream of bytes.
     fn size_as_bytes(&self) -> usize;
@@ -45,21 +47,28 @@ pub(crate) struct Varint {
 }
 
 impl NetworkType for Varint {
-    fn from_bytes(bytes: &[u8]) -> Option<Self> {
+    fn from_bytes(bytes: &[u8]) -> Result<Self, Error> {
         let sizeof_out_varint = Varint::size_from_bytes(bytes)?;
 
-        Some(Varint {
+        Ok(Varint {
             bytes: bytes[0..sizeof_out_varint].to_vec(),
         })
     }
 
-    fn size_from_bytes(bytes: &[u8]) -> Option<usize> {
+    fn size_from_bytes(bytes: &[u8]) -> Result<usize, Error> {
         for i in 0..Self::SIZE_TO_READ {
-            if bytes.get(i)? & 0b10000000 == 0 && Varint::bytes_are_valid_varint(&bytes[0..=i]) {
-                return Some(i + 1);
+            let curr_byte = bytes.get(i).ok_or_else(|| {
+                Error::new(ErrorKind::InvalidData, "varint bytes not long enough")
+            })?;
+
+            if curr_byte & 0b10000000 == 0 && Varint::bytes_are_valid_varint(&bytes[0..=i]) {
+                return Ok(i + 1);
             }
         }
-        None
+        Err(Error::new(
+            ErrorKind::InvalidData,
+            "improper encoding for a varint",
+        ))
     }
 
     fn size_as_bytes(&self) -> usize {
@@ -73,10 +82,7 @@ impl NetworkType for Varint {
     const SIZE_TO_READ: usize = 5;
 }
 
-impl Varint
-where
-    Self: NetworkType,
-{
+impl Varint {
     /// Constructs a new unallocated `Varint`.
     pub(crate) fn new() -> Varint {
         Varint { bytes: Vec::new() }
@@ -201,25 +207,28 @@ impl std::fmt::Display for NetworkString {
 }
 
 impl NetworkType for NetworkString {
-    fn from_bytes(bytes: &[u8]) -> Option<Self> {
+    fn from_bytes(bytes: &[u8]) -> Result<Self, Error> {
         let string_length_varint = Varint::from_bytes(bytes)?;
         let string_length = string_length_varint.to_i32();
 
         let sizeof_string_length = string_length_varint.as_bytes().len();
 
-        Some(NetworkString {
+        Ok(NetworkString {
             bytes: bytes
-                .get(..string_length as usize + sizeof_string_length)?
+                .get(..string_length as usize + sizeof_string_length)
+                .ok_or_else(|| {
+                    Error::new(ErrorKind::InvalidData, "encoded length longer than bytes")
+                })?
                 .to_vec(),
         })
     }
 
-    fn size_from_bytes(bytes: &[u8]) -> Option<usize> {
+    fn size_from_bytes(bytes: &[u8]) -> Result<usize, Error> {
         let string_length = Varint::from_bytes(bytes)?.to_i32();
 
         let sizeof_string_length = Varint::size_from_int32(string_length);
 
-        Some(string_length as usize + sizeof_string_length)
+        Ok(string_length as usize + sizeof_string_length)
     }
 
     fn size_as_bytes(&self) -> usize {
@@ -251,22 +260,21 @@ impl UnsignedShort {
 }
 
 impl NetworkType for UnsignedShort {
-    /// `bytes` must be big endian.
-    fn from_bytes(bytes: &[u8]) -> Option<Self> {
-        if UnsignedShort::size_from_bytes(bytes).is_some() {
-            Some(UnsignedShort {
-                bytes: bytes.try_into().ok()?,
-            })
-        } else {
-            None
-        }
+    /// `bytes` is big endian.
+    fn from_bytes(bytes: &[u8]) -> Result<Self, Error> {
+        UnsignedShort::size_from_bytes(bytes).map(|_| UnsignedShort {
+            bytes: [bytes[0], bytes[1]],
+        })
     }
 
-    fn size_from_bytes(bytes: &[u8]) -> Option<usize> {
+    fn size_from_bytes(bytes: &[u8]) -> Result<usize, Error> {
         if bytes.len() < 2 {
-            None
+            Err(Error::new(
+                ErrorKind::InvalidData,
+                "UnsignedShort is 2 bytes long",
+            ))
         } else {
-            Some(2)
+            Ok(2)
         }
     }
 
@@ -291,14 +299,14 @@ pub(crate) struct ByteArray {
 
 impl NetworkType for ByteArray {
     /// expects `bytes` to encode the length.
-    fn from_bytes(bytes: &[u8]) -> Option<Self> {
-        Some(ByteArray {
+    fn from_bytes(bytes: &[u8]) -> Result<Self, Error> {
+        Ok(ByteArray {
             bytes: bytes.to_vec(),
         })
     }
 
-    fn size_from_bytes(bytes: &[u8]) -> Option<usize> {
-        Some(bytes.len())
+    fn size_from_bytes(bytes: &[u8]) -> Result<usize, Error> {
+        Ok(bytes.len())
     }
 
     fn size_as_bytes(&self) -> usize {
@@ -403,13 +411,13 @@ mod tests {
             assert_eq!(varint.bytes, vec![0xff, 0xff, 0xff, 0xff, 0x0f]);
 
             let bad_varint = Varint::from_bytes(&[0xff]);
-            assert!(bad_varint.is_none());
+            assert!(bad_varint.is_err());
 
             let bad_varint = Varint::from_bytes(&[0xff, 0xff, 0xff, 0xff, 0xff]);
-            assert!(bad_varint.is_none());
+            assert!(bad_varint.is_err());
 
             let bad_varint = Varint::from_bytes(&[0xff, 0xff, 0xff, 0xff, 0xff, 0x0f]);
-            assert!(bad_varint.is_none());
+            assert!(bad_varint.is_err());
         }
     }
 

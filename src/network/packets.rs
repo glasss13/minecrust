@@ -9,7 +9,7 @@ use sha1::Sha1;
 use std::fmt::Write;
 
 use super::connection::Connection;
-use super::types::{ByteArray, NetworkString, NetworkType, UnsignedShort, Varint};
+use super::network_type::{ByteArray, NetworkString, NetworkType, UnsignedShort, Varint};
 
 pub(crate) trait Packet {
     fn packet_id(&self) -> u8;
@@ -46,7 +46,7 @@ impl Packet for ServerBoundPacket {
 }
 
 impl ServerBoundPacket {
-    pub(crate) async fn send(&self, connection: &mut Connection) {
+    pub(crate) async fn send(&self, connection: &mut Connection) -> Result<(), std::io::Error> {
         let encoded_packet_id = Varint::from_i32(self.packet_id().into());
 
         match self {
@@ -69,13 +69,13 @@ impl ServerBoundPacket {
 
                 connection
                     .write_network_type(&Varint::from_i32(len as i32))
-                    .await;
-                connection.write_network_type(&encoded_packet_id).await;
-                connection.write_network_type(protocol_version).await;
-                connection.write_network_type(server_address).await;
-                connection.write_network_type(server_port).await;
-                connection.write_network_type(next_state).await;
-                connection.flush_writer().await.unwrap();
+                    .await?;
+                connection.write_network_type(&encoded_packet_id).await?;
+                connection.write_network_type(protocol_version).await?;
+                connection.write_network_type(server_address).await?;
+                connection.write_network_type(server_port).await?;
+                connection.write_network_type(next_state).await?;
+                connection.flush_writer().await?;
 
                 connection.set_connection_state(match next_state.to_i32() {
                     1 => ConnectionState::Status,
@@ -88,12 +88,13 @@ impl ServerBoundPacket {
 
                 connection
                     .write_network_type(&Varint::from_i32(len as i32))
-                    .await;
-                connection.write_network_type(&encoded_packet_id).await;
-                connection.write_network_type(username).await;
-                connection.flush_writer().await.unwrap();
+                    .await?;
+                connection.write_network_type(&encoded_packet_id).await?;
+                connection.write_network_type(username).await?;
+                connection.flush_writer().await?;
             }
         }
+        Ok(())
     }
 }
 
