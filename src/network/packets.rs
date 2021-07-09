@@ -116,65 +116,47 @@ pub(crate) enum ClientBoundPacket {
 }
 
 impl ClientBoundPacket {
-    pub(crate) async fn from_connection(connection: &mut Connection) -> ClientBoundPacket {
-        let packet_length = connection
-            .read_network_type::<Varint>()
-            .await
-            .unwrap()
-            .to_i32();
-        let packet_id = connection
-            .read_network_type::<Varint>()
-            .await
-            .unwrap()
-            .to_i32();
+    pub(crate) async fn from_connection(
+        connection: &mut Connection,
+    ) -> Result<ClientBoundPacket, std::io::Error> {
+        let packet_length = connection.read_network_type::<Varint>().await?.to_i32();
+        let packet_id = connection.read_network_type::<Varint>().await?.to_i32();
 
         match connection.connection_state() {
             ConnectionState::Handshaking => unreachable!(),
-            ConnectionState::Play => todo!(),
-            ConnectionState::Status => todo!(),
+            ConnectionState::Play => todo!("id: {:#2x}", packet_id),
+            ConnectionState::Status => todo!("id: {:#2x}", packet_id),
             ConnectionState::Login => match packet_id {
                 0x01 => {
-                    let server_id = connection
-                        .read_network_type::<NetworkString>()
-                        .await
-                        .unwrap();
-                    let public_key_length = connection.read_network_type::<Varint>().await.unwrap();
+                    let server_id = connection.read_network_type::<NetworkString>().await?;
+                    let public_key_length = connection.read_network_type::<Varint>().await?;
                     let public_key = connection
                         .read_network_type_with_size::<ByteArray>(
                             public_key_length.to_i32() as usize
                         )
-                        .await
-                        .unwrap();
-                    let verify_token_length =
-                        connection.read_network_type::<Varint>().await.unwrap();
+                        .await?;
+                    let verify_token_length = connection.read_network_type::<Varint>().await?;
                     let verify_token = connection
                         .read_network_type_with_size::<ByteArray>(
                             verify_token_length.to_i32() as usize
                         )
-                        .await
-                        .unwrap();
+                        .await?;
 
-                    ClientBoundPacket::EncryptionRequest {
+                    Ok(ClientBoundPacket::EncryptionRequest {
                         server_id,
                         public_key_length,
                         public_key,
                         verify_token_length,
                         verify_token,
-                    }
+                    })
                 }
                 0x02 => {
-                    let uuid = connection
-                        .read_network_type::<NetworkString>()
-                        .await
-                        .unwrap();
-                    let username = connection
-                        .read_network_type::<NetworkString>()
-                        .await
-                        .unwrap();
+                    let uuid = connection.read_network_type::<NetworkString>().await?;
+                    let username = connection.read_network_type::<NetworkString>().await?;
 
-                    ClientBoundPacket::LoginSuccess { uuid, username }
+                    Ok(ClientBoundPacket::LoginSuccess { uuid, username })
                 }
-                _ => todo!(),
+                _ => todo!("id: {:#2x}", packet_id),
             },
         }
     }
