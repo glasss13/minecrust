@@ -8,6 +8,8 @@ use rand::{self, Rng};
 use sha1::Sha1;
 use std::fmt::Write;
 
+use crate::ClientData;
+
 use super::connection::Connection;
 use super::network_type::{ByteArray, NetworkString, NetworkType, UnsignedShort, Varint};
 
@@ -161,7 +163,7 @@ impl ClientBoundPacket {
         }
     }
 
-    pub(crate) fn process(&self) {
+    pub(crate) async fn process(&self, client: &mut ClientData) {
         match self {
             ClientBoundPacket::EncryptionRequest {
                 server_id: _,
@@ -202,11 +204,23 @@ impl ClientBoundPacket {
                     String::from_utf8(to_encrypt).unwrap()
                 );
             }
-            ClientBoundPacket::LoginSuccess { uuid, username } => println!(
-                "{} logged on with UUID {}",
-                username.to_string(),
-                uuid.to_string()
-            ),
+            ClientBoundPacket::LoginSuccess { uuid, username } => {
+                client
+                    .connection
+                    .as_mut()
+                    .unwrap()
+                    .set_connection_state(ConnectionState::Play);
+
+                for listener in &client.login_listeners {
+                    let _ = listener.send((username.to_string(), uuid.to_string()));
+                }
+
+                println!(
+                    "{} logged on with UUID {}",
+                    username.to_string(),
+                    uuid.to_string()
+                )
+            }
         }
     }
 }
@@ -262,7 +276,7 @@ impl Packet for ClientBoundPacket {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub(crate) enum ConnectionState {
     Handshaking = -1,
     Play = 0,
