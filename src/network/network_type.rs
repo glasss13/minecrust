@@ -5,6 +5,8 @@
 
 use std::io::{Error, ErrorKind};
 
+use uuid::Uuid;
+
 /// Types that are used in the [Minecraft network protocol](https://wiki.vg/index.php?title=Protocol&oldid=7368).
 pub(crate) trait NetworkType: Sized {
     /// Constructs the [`NetworkType`] from a collection of bytes.
@@ -319,6 +321,36 @@ impl NetworkType for ByteArray {
 
     /// context dependant
     const SIZE_TO_READ: usize = 0;
+}
+
+impl NetworkType for Uuid {
+    fn from_bytes(bytes: &[u8]) -> Result<Self, Error> {
+        Uuid::size_from_bytes(bytes).map(|_| {
+            Uuid::from_bytes([
+                bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+                bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14],
+                bytes[15],
+            ])
+        })
+    }
+
+    fn size_from_bytes(bytes: &[u8]) -> Result<usize, Error> {
+        if bytes.len() < 16 {
+            Err(Error::new(ErrorKind::InvalidData, "uuid must be 16 bytes"))
+        } else {
+            Ok(16)
+        }
+    }
+
+    fn size_as_bytes(&self) -> usize {
+        16
+    }
+
+    fn as_bytes(&self) -> &[u8] {
+        self.as_bytes()
+    }
+
+    const SIZE_TO_READ: usize = 16;
 }
 
 #[cfg(test)]
