@@ -81,6 +81,7 @@ pub struct ClientBuilder {
     ip: Option<String>,
     password: Option<String>,
     client_token: Option<String>,
+    access_token: Option<String>,
 }
 
 impl ClientBuilder {
@@ -91,6 +92,7 @@ impl ClientBuilder {
             ip: None,
             password: None,
             client_token: None,
+            access_token: None,
         }
     }
 
@@ -114,8 +116,28 @@ impl ClientBuilder {
         self
     }
 
+    pub fn access_token<S: Into<String>>(mut self, access_token: S) -> ClientBuilder {
+        self.access_token = Some(access_token.into());
+        self
+    }
+
     pub async fn login(self) -> Result<Client, Box<dyn std::error::Error>> {
-        let session = if let Some(password) = &self.password {
+        let session = if let Some(access_token) = &self.access_token {
+            println!("authenticating with token");
+            if yggdrasil::is_token_valid(access_token).await? {
+                // no need to refresh the token, but don't know how to create a session so for now its a no-op
+                println!("token is already valid, no need to refresh");
+            }
+            Some(
+                yggdrasil::refresh_token(
+                    access_token,
+                    &self
+                        .client_token
+                        .expect("client token is required to login with access token"),
+                )
+                .await?,
+            )
+        } else if let Some(password) = &self.password {
             println!("authenticating with password");
             Some(
                 yggdrasil::authenticate_password(
