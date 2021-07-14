@@ -1,23 +1,17 @@
-use hyper::body::HttpBody;
+use network::authentication::yggdrasil::{self, Session};
 use network::connection::Connection;
 use network::network_type::{NetworkString, UnsignedShort, Varint};
 use network::packets::{ClientBoundPacket, ConnectionState, ServerBoundPacket};
-use serde_json::{json, Value};
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
-
-use std::error::Error;
 
 mod network;
 
 #[derive(Debug)]
 struct ClientData {
-    username: String,
-    uuid: String,
-    connected: bool,
+    session: Option<Session>,
+    connected_to_server: bool,
     connection: Option<Connection>,
-    authenticated: bool,
-    access_token: Option<String>,
     login_listeners: Vec<watch::Sender<(String, String)>>,
 }
 
@@ -27,6 +21,7 @@ enum ClientCommand {
         payload: String,
         resp: oneshot::Sender<String>,
     },
+    Disconnect,
     OnLogin {
         resp: watch::Sender<(String, String)>,
     },
@@ -49,6 +44,10 @@ impl Client {
 
         let res = resp_rx.await;
         println!("we pinged and they ponged: {}", res.unwrap());
+    }
+
+    pub async fn disconnect(&mut self) {
+        self.sender.send(ClientCommand::Disconnect).await.unwrap();
     }
 
     pub fn on_login<Fut>(
@@ -81,6 +80,7 @@ pub struct ClientBuilder {
     port: u16,
     ip: Option<String>,
     password: Option<String>,
+    client_token: Option<String>,
 }
 
 impl ClientBuilder {
@@ -90,6 +90,7 @@ impl ClientBuilder {
             port: 25565,
             ip: None,
             password: None,
+            client_token: None,
         }
     }
 
@@ -108,40 +109,53 @@ impl ClientBuilder {
         self
     }
 
-    pub async fn login(self) -> Result<Client, std::io::Error> {
-        let should_authenticate = self.password.is_some();
-        if should_authenticate {
-            todo!()
-        }
+    pub fn client_token<S: Into<String>>(mut self, client_token: S) -> ClientBuilder {
+        self.client_token = Some(client_token.into());
+        self
+    }
+
+    pub async fn login(self) -> Result<Client, Box<dyn std::error::Error>> {
+        let session = if let Some(password) = &self.password {
+            println!("authenticating with password");
+            Some(
+                yggdrasil::authenticate_password(
+                    &self.account_name,
+                    password,
+                    self.client_token.as_deref(),
+                )
+                .await?,
+            )
+        } else {
+            None
+        };
 
         let mut connection = Connection::new(self.ip.as_ref().unwrap().into(), self.port).await?;
 
-        // make the packets actually reflect the Client args
         let handshake_packet = ServerBoundPacket::Handshake {
             protocol_version: Varint::from_i32(47),
             server_address: NetworkString::from_string(self.ip.as_ref().unwrap()),
-            server_port: UnsignedShort::from_u16(25565),
+            server_port: UnsignedShort::from_u16(self.port),
             next_state: ConnectionState::Login.to_varint(),
         };
 
         let login_packet = ServerBoundPacket::LoginStart {
-            username: NetworkString::from_string(&self.account_name),
+            username: NetworkString::from_string(match &session {
+                Some(session) => session.username(),
+                None => &self.account_name,
+            }),
         };
 
         handshake_packet.send(&mut connection).await?;
         login_packet.send(&mut connection).await?;
 
         let mut client = ClientData {
-            username: self.account_name,
-            uuid: "".into(),
+            session,
             connection: Some(connection),
-            authenticated: false,
-            access_token: None,
-            connected: true,
+            connected_to_server: true,
             login_listeners: vec![],
         };
 
-        let (sender, mut receiver) = mpsc::channel::<ClientCommand>(100);
+        let (sender, mut receiver) = mpsc::channel(100);
 
         let packet_process_task = tokio::spawn(async move {
             loop {
@@ -152,9 +166,13 @@ impl ClientBuilder {
                     },
                     Some(msg) = receiver.recv() => {
                         match msg {
-                            ClientCommand::Ping { payload, resp } => {
+                            ClientCommand::Ping { resp , .. } => {
                                 let _ = resp.send("pong".to_string());
                             },
+                            ClientCommand::Disconnect => {
+                                connection.shutdown().await.unwrap();
+                                break;
+                            }
                             ClientCommand::OnLogin {resp} => {
                                 client.login_listeners.push(resp);
                             }
@@ -167,47 +185,6 @@ impl ClientBuilder {
             sender,
             packet_process_task,
         })
-    }
-
-    pub async fn authenticate(self) -> Result<Client, Box<dyn Error>> {
-        let client =
-            hyper::Client::builder().build::<_, hyper::Body>(hyper_tls::HttpsConnector::new());
-
-        let req = hyper::Request::builder()
-            .method("POST")
-            .uri("https://authserver.mojang.com/authenticate")
-            .body(hyper::Body::from(
-                json!({
-                    "agent": {
-                        "name": "Minecraft",
-                        "version": 1
-                    },
-                    "username": self.account_name,
-                    "password": self.password
-                })
-                .to_string(),
-            ))?;
-
-        let mut resp = client.request(req).await?;
-
-        if resp.status() != hyper::StatusCode::OK {
-            return Err(format!("unexpected status code {}", resp.status()).into());
-        }
-
-        let body: Value = serde_json::from_slice(&resp.body_mut().data().await.unwrap()?)?;
-        let selected_profile = &body["selectedProfile"];
-
-        let thing = ClientData {
-            username: selected_profile["name"].as_str().unwrap().to_string(),
-            uuid: selected_profile["id"].as_str().unwrap().to_string(),
-            access_token: Some(body["accessToken"].as_str().unwrap().to_string()),
-            authenticated: true,
-            connection: None,
-            connected: false,
-            login_listeners: vec![],
-        };
-
-        todo!()
     }
 }
 
@@ -224,6 +201,9 @@ async fn test_connect_to_server() {
     client.on_login(|username, uuid| async move {
         println!("username: {}, uuid: {}", username, uuid);
     });
+
+    // tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    // client.disconnect().await;
 
     client.join().await;
 }
