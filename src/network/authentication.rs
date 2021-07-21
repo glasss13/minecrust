@@ -133,4 +133,40 @@ pub(crate) mod yggdrasil {
 
         Ok(resp.status() == hyper::StatusCode::NO_CONTENT)
     }
+
+    pub(crate) async fn join_server(
+        access_token: &str,
+        selected_profile: &Uuid,
+        server_id: &str,
+    ) -> Result<(), Box<dyn Error>> {
+        let client =
+            hyper::Client::builder().build::<_, hyper::Body>(hyper_tls::HttpsConnector::new());
+
+        let req = hyper::Request::builder()
+            .method("POST")
+            .uri("https://sessionserver.mojang.com/session/minecraft/join")
+            .body(hyper::Body::from(
+                json!({
+                    "accessToken": access_token,
+                    "selectedProfile": selected_profile.to_simple().to_string(),
+                    "serverId": server_id,
+                })
+                .to_string(),
+            ))?;
+
+        let mut resp = client.request(req).await?;
+
+        if resp.status() == hyper::StatusCode::NO_CONTENT {
+            Ok(())
+        } else {
+            let body: Value = serde_json::from_slice(&resp.body_mut().data().await.unwrap()?)?;
+            Err(AuthError::new(
+                body["errorMessage"]
+                    .as_str()
+                    .unwrap_or_else(|| body["error"].as_str().unwrap())
+                    .to_string(),
+            )
+            .into())
+        }
+    }
 }
