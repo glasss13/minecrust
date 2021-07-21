@@ -1,13 +1,8 @@
-use aes::cipher::AsyncStreamCipher;
-use aes::Aes128;
-use cfb8::cipher::NewCipher;
-use cfb8::Cfb8;
-type AesCfb8 = Cfb8<Aes128>;
-
 use rand::{self, Rng};
 use sha1::Sha1;
 use std::fmt::Write;
 
+use crate::network::authentication::yggdrasil;
 use crate::ClientData;
 
 use super::connection::Connection;
@@ -29,6 +24,13 @@ pub(crate) enum ServerBoundPacket {
     },
     /// <https://wiki.vg/index.php?title=Protocol&oldid=7368#Login_Start>.
     LoginStart { username: NetworkString },
+    /// <https://wiki.vg/index.php?title=Protocol&oldid=7368#Encryption_Response>.
+    EncryptionResponse {
+        shared_secret_length: Varint,
+        shared_secret: ByteArray,
+        verify_token_length: Varint,
+        verify_token: ByteArray,
+    },
 }
 
 impl Packet for ServerBoundPacket {
@@ -36,6 +38,7 @@ impl Packet for ServerBoundPacket {
         match self {
             ServerBoundPacket::Handshake { .. } => 0x00,
             ServerBoundPacket::LoginStart { .. } => 0x00,
+            ServerBoundPacket::EncryptionResponse { .. } => 0x01,
         }
     }
 
@@ -43,6 +46,7 @@ impl Packet for ServerBoundPacket {
         match self {
             ServerBoundPacket::Handshake { .. } => ConnectionState::Handshaking,
             ServerBoundPacket::LoginStart { .. } => ConnectionState::Login,
+            ServerBoundPacket::EncryptionResponse { .. } => ConnectionState::Login,
         }
     }
 }
@@ -93,6 +97,29 @@ impl ServerBoundPacket {
                     .await?;
                 connection.write_network_type(&encoded_packet_id).await?;
                 connection.write_network_type(username).await?;
+                connection.flush_writer().await?;
+            }
+            ServerBoundPacket::EncryptionResponse {
+                shared_secret_length,
+                shared_secret,
+                verify_token_length,
+                verify_token,
+            } => {
+                let len = shared_secret_length.size_as_bytes()
+                    + shared_secret_length.to_i32() as usize
+                    + verify_token_length.size_as_bytes()
+                    + verify_token_length.to_i32() as usize
+                    + encoded_packet_id.size_as_bytes();
+
+                connection
+                    .write_network_type(&Varint::from_i32(len as i32))
+                    .await?;
+
+                connection.write_network_type(&encoded_packet_id).await?;
+                connection.write_network_type(shared_secret_length).await?;
+                connection.write_network_type(shared_secret).await?;
+                connection.write_network_type(verify_token_length).await?;
+                connection.write_network_type(verify_token).await?;
                 connection.flush_writer().await?;
             }
         }
@@ -163,46 +190,70 @@ impl ClientBoundPacket {
         }
     }
 
-    pub(crate) async fn process(&self, client: &mut ClientData) {
+    pub(crate) async fn process(
+        &self,
+        client: &mut ClientData,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         match self {
             ClientBoundPacket::EncryptionRequest {
                 server_id: _,
-                public_key_length,
                 public_key,
-                verify_token_length,
                 verify_token,
+                ..
             } => {
-                println!("Enabling encryption...");
                 let shared_secret: [u8; 16] = rand::thread_rng().gen();
                 let server_hash_string =
                     mc_hex_digest(&[&shared_secret, public_key.as_bytes()]).unwrap();
 
-                println!("server hash: {}", server_hash_string);
-
-                println!(
-                    "public_key_length: {} public_key length {}",
-                    public_key_length.to_i32(),
-                    public_key.as_bytes().len()
+                let session = client.session.as_ref().expect(
+                    "attempted to log in to online mode server with unauthenticated account",
                 );
+                yggdrasil::join_server(session.access_token(), session.uuid(), &server_hash_string)
+                    .await?;
 
-                let mut cipher_encrypt = AesCfb8::new_from_slices(&shared_secret, &shared_secret)
-                    .expect("something went wrong");
+                let public_key =
+                    openssl::rsa::Rsa::public_key_from_der(public_key.as_bytes()).unwrap();
 
-                let mut cipher_decrypt = AesCfb8::new_from_slices(&shared_secret, &shared_secret)
-                    .expect("something went wrong");
+                let mut encrypted_shared_secret = vec![0; public_key.size() as usize];
+                let mut encrypted_verify_token = vec![0; public_key.size() as usize];
 
-                let to_encrypt_string = String::from("yawmadah");
+                public_key
+                    .public_encrypt(
+                        &shared_secret,
+                        &mut encrypted_shared_secret,
+                        openssl::rsa::Padding::PKCS1,
+                    )
+                    .unwrap();
+                public_key
+                    .public_encrypt(
+                        verify_token.as_bytes(),
+                        &mut encrypted_verify_token,
+                        openssl::rsa::Padding::PKCS1,
+                    )
+                    .unwrap();
 
-                let mut to_encrypt = to_encrypt_string.into_bytes();
+                ServerBoundPacket::EncryptionResponse {
+                    shared_secret_length: Varint::from_i32(encrypted_shared_secret.len() as i32),
+                    shared_secret: ByteArray::from_bytes(&encrypted_shared_secret).unwrap(),
+                    verify_token_length: Varint::from_i32(encrypted_verify_token.len() as i32),
+                    verify_token: ByteArray::from_bytes(&encrypted_verify_token).unwrap(),
+                }
+                .send(&mut client.connection.as_mut().unwrap())
+                .await?;
+                println!("enabling encryption");
+                client.connection_mut().enable_encryption(&shared_secret);
+                // let to_encrypt_string = String::from("yawmadah");
 
-                cipher_encrypt.encrypt(&mut to_encrypt);
+                // let mut to_encrypt = to_encrypt_string.into_bytes();
 
-                cipher_decrypt.decrypt(&mut to_encrypt);
+                // cipher_encrypt.encrypt(&mut to_encrypt);
 
-                println!(
-                    "the unencrypted data is {}",
-                    String::from_utf8(to_encrypt).unwrap()
-                );
+                // cipher_decrypt.decrypt(&mut to_encrypt);
+
+                // println!(
+                //     "the unencrypted data is {}",
+                //     String::from_utf8(to_encrypt).unwrap()
+                // );
             }
             ClientBoundPacket::LoginSuccess { uuid, username } => {
                 client
@@ -222,6 +273,7 @@ impl ClientBoundPacket {
                 )
             }
         }
+        Ok(())
     }
 }
 
