@@ -1,4 +1,5 @@
-use network::authentication::yggdrasil::{self, Session};
+use network::authentication::yggdrasil;
+use network::authentication::yggdrasil::Session;
 use network::connection::Connection;
 use network::network_type::{NetworkString, UnsignedShort, Varint};
 use network::packets::{ClientBoundPacket, ConnectionState, ServerBoundPacket};
@@ -7,12 +8,27 @@ use tokio::task::JoinHandle;
 
 mod network;
 
-#[derive(Debug)]
 struct ClientData {
     session: Option<Session>,
     connected_to_server: bool,
     connection: Option<Connection>,
     login_listeners: Vec<watch::Sender<(String, String)>>,
+}
+
+impl ClientData {
+    fn connection_mut(&mut self) -> &mut Connection {
+        self.connection.as_mut().unwrap()
+    }
+}
+
+impl std::fmt::Debug for ClientData {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ClientData")
+            .field("session", &self.session)
+            .field("connected_to_server", &self.connected_to_server)
+            .field("login_listeners", &self.login_listeners.len())
+            .finish()
+    }
 }
 
 #[derive(Debug)]
@@ -184,7 +200,7 @@ impl ClientBuilder {
                 let connection = client.connection.as_mut().unwrap();
                 tokio::select! {
                     Ok(packet) = ClientBoundPacket::from_connection(connection) => {
-                        packet.process(&mut client).await;
+                        packet.process(&mut client).await.unwrap();
                     },
                     Some(msg) = receiver.recv() => {
                         match msg {
@@ -212,20 +228,16 @@ impl ClientBuilder {
 
 #[tokio::test]
 async fn test_connect_to_server() {
-    let mut client = ClientBuilder::new("Player")
+    let mut client = ClientBuilder::new("email")
         .ip("localhost")
+        .password("password")
         .login()
         .await
         .unwrap();
 
-    client.ping().await;
-
     client.on_login(|username, uuid| async move {
         println!("username: {}, uuid: {}", username, uuid);
     });
-
-    // tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-    // client.disconnect().await;
 
     client.join().await;
 }
