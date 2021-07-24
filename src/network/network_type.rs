@@ -48,6 +48,12 @@ pub(crate) struct Varint {
     bytes: Vec<u8>,
 }
 
+impl std::fmt::Display for Varint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Varint({})", self.to_i32())
+    }
+}
+
 impl NetworkType for Varint {
     fn from_bytes(bytes: &[u8]) -> Result<Self, Error> {
         let sizeof_out_varint = Varint::size_from_bytes(bytes)?;
@@ -202,7 +208,7 @@ impl std::fmt::Display for NetworkString {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "{}",
+            "NetworkString({})",
             String::from_utf8(self.string_bytes().to_vec()).unwrap()
         )
     }
@@ -258,6 +264,16 @@ impl UnsignedShort {
         UnsignedShort {
             bytes: val.to_be_bytes(),
         }
+    }
+
+    pub(crate) fn to_u16(&self) -> u16 {
+        u16::from_be_bytes(self.bytes)
+    }
+}
+
+impl std::fmt::Display for UnsignedShort {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "UnsignedShort({})", self.to_u16())
     }
 }
 
@@ -321,6 +337,12 @@ impl NetworkType for ByteArray {
 
     /// context dependant
     const SIZE_TO_READ: usize = 0;
+}
+
+impl std::fmt::Display for ByteArray {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "ByteArray({} bytes)", self.bytes.len())
+    }
 }
 
 impl NetworkType for Uuid {

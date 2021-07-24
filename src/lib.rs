@@ -200,6 +200,7 @@ impl ClientBuilder {
                 let connection = client.connection.as_mut().unwrap();
                 tokio::select! {
                     Ok(packet) = ClientBoundPacket::from_connection(connection) => {
+                        println!("received a packet: {}", packet);
                         packet.process(&mut client).await.unwrap();
                     },
                     Some(msg) = receiver.recv() => {
