@@ -1,6 +1,6 @@
 use rand::{self, Rng};
 use sha1::Sha1;
-use std::fmt::Write;
+use std::fmt::{format, Write};
 
 use crate::network::authentication::yggdrasil;
 use crate::ClientData;
@@ -142,6 +142,32 @@ pub(crate) enum ClientBoundPacket {
         uuid: NetworkString,
         username: NetworkString,
     },
+}
+
+impl std::fmt::Display for ClientBoundPacket {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ClientBoundPacket::EncryptionRequest {
+                server_id,
+                public_key_length,
+                public_key,
+                verify_token_length,
+                verify_token,
+            } => f
+                .debug_struct("EncryptionRequest")
+                .field("server_id", &format_args!("{}", server_id))
+                .field("public_key_len", &format_args!("{}", public_key_length))
+                .field("public_key", &format_args!("{}", public_key))
+                .field("verify_token_len", &format_args!("{}", verify_token_length))
+                .field("verify_token", &format_args!("{}", verify_token))
+                .finish(),
+            ClientBoundPacket::LoginSuccess { uuid, username } => f
+                .debug_struct("LoginSuccess")
+                .field("uuid", &format_args!("{}", uuid))
+                .field("username", &format_args!("{}", username))
+                .finish(),
+        }
+    }
 }
 
 impl ClientBoundPacket {
