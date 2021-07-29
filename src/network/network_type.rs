@@ -375,8 +375,92 @@ impl NetworkType for Uuid {
     const SIZE_TO_READ: usize = 16;
 }
 
+/// Signed 32-bit integer, two's complement
+///
+/// <https://wiki.vg/Protocol#Data_types>
+pub(crate) struct Int {
+    /// big endian
+    value: i32,
+}
+
+impl Int {
+    pub(crate) fn from_i32(val: i32) -> Int {
+        Int { value: val.to_be() }
+    }
+
+    pub(crate) fn as_i32(&self) -> i32 {
+        // since value is always be, calling to_be() on it will for be do nothing for be and for le reverse it back to its original
+        self.value.to_be()
+    }
+}
+
+impl std::fmt::Display for Int {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Int({})", self.as_i32())
+    }
+}
+
+impl NetworkType for Int {
+    fn from_bytes(bytes: &[u8]) -> Result<Self, Error> {
+        Int::size_from_bytes(bytes).map(|_| Int {
+            value: i32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]).to_be(),
+        })
+    }
+
+    fn size_from_bytes(bytes: &[u8]) -> Result<usize, Error> {
+        if bytes.len() < 4 {
+            Err(Error::new(ErrorKind::InvalidData, "Int must be 4 bytes"))
+        } else {
+            Ok(4)
+        }
+    }
+
+    fn size_as_bytes(&self) -> usize {
+        4
+    }
+
+    fn as_bytes(&self) -> &[u8] {
+        let value_pointer = ((&self.value) as *const i32) as *const u8;
+
+        unsafe { std::slice::from_raw_parts(value_pointer, 4) }
+    }
+
+    const SIZE_TO_READ: usize = 4;
+}
+
 #[cfg(test)]
 mod tests {
+    mod int {
+        use super::super::*;
+        #[test]
+        fn test_construction() {
+            let int = Int::from_i32(10);
+            assert_eq!(int.as_i32(), 10);
+
+            let int = Int::from_i32(-1);
+            assert_eq!(int.as_i32(), -1);
+        }
+
+        #[test]
+        fn test_from_bytes() {
+            let int = Int::from_bytes(&[1, 2, 3]);
+            assert!(int.is_err());
+
+            let int = Int::from_bytes(&[1, 2, 3, 4]);
+            assert!(int.is_ok());
+            assert_eq!(int.unwrap().as_bytes(), &[1, 2, 3, 4]);
+        }
+
+        #[test]
+        fn test_as_bytes() {
+            let int = Int::from_i32(-1);
+            assert_eq!(int.as_bytes(), (-1i32).to_be_bytes());
+
+            let int = Int::from_i32(1);
+            assert_eq!(int.as_bytes(), 1i32.to_be_bytes());
+        }
+    }
+
     mod varint {
         use super::super::*;
 
