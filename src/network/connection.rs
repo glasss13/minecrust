@@ -1,23 +1,39 @@
-use super::buf_reader::BufReader;
 use super::network_type::NetworkType;
 use super::packets::ConnectionState;
 
 use aes::cipher::{AsyncStreamCipher, NewCipher};
 use aes::Aes128;
+use bytes::{Buf, BytesMut};
 use cfb8::Cfb8;
-use std::pin::Pin;
-use tokio::io::BufWriter;
-use tokio::io::{AsyncBufRead, AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncWriteExt, BufWriter};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::TcpStream;
 
 pub(crate) struct Connection {
-    reader: BufReader<OwnedReadHalf>,
+    reader: BufferedReader,
     writer: BufWriter<OwnedWriteHalf>,
     connection_state: ConnectionState,
     encryption_enabled: bool,
     aes_encrypt_cipher: Option<Cfb8<Aes128>>,
     aes_decrypt_cipher: Option<Cfb8<Aes128>>,
+}
+
+pub(crate) struct BufferedReader {
+    stream: OwnedReadHalf,
+    buffer: BytesMut,
+}
+
+impl BufferedReader {
+    pub(crate) fn new(stream: OwnedReadHalf) -> BufferedReader {
+        BufferedReader::with_capacity(stream, 4096)
+    }
+
+    pub(crate) fn with_capacity(stream: OwnedReadHalf, capacity: usize) -> BufferedReader {
+        BufferedReader {
+            stream,
+            buffer: BytesMut::with_capacity(capacity),
+        }
+    }
 }
 
 impl Connection {
@@ -27,7 +43,7 @@ impl Connection {
         let (reader, writer) = stream.into_split();
 
         Ok(Connection {
-            reader: BufReader::new(reader),
+            reader: BufferedReader::with_capacity(reader, 1000000),
             writer: BufWriter::new(writer),
             connection_state: ConnectionState::Handshaking,
             encryption_enabled: false,
@@ -41,72 +57,75 @@ impl Connection {
     }
 
     pub(crate) async fn read_network_type<T: NetworkType>(&mut self) -> Result<T, std::io::Error> {
-        let encryption_enabled = self.encryption_enabled();
-        let bytes_decrypted = self.reader.bytes_decrypted();
-        let mut pinned_reader = Pin::new(&mut self.reader);
-
-        while pinned_reader.buffer().len() < T::SIZE_TO_READ {
-            // reads 0 bytes, just a way to fill the backing buffer, similar to the `fill_buffer` function.
-            let bytes_read = pinned_reader.read(&mut [0; 0]).await?;
-            assert_eq!(bytes_read, 0);
-        }
-
-        if encryption_enabled {
-            // we haven't already decrypted all of it, so decrypt the rest now.
-            if bytes_decrypted < T::SIZE_TO_READ {
-                self.aes_decrypt_cipher
-                    .as_mut()
-                    .unwrap()
-                    .decrypt(&mut pinned_reader.buffer_mut()[bytes_decrypted..T::SIZE_TO_READ]);
+        while self.reader.buffer.remaining() < T::SIZE_TO_READ {
+            let bytes_read = self.reader.stream.read_buf(&mut self.reader.buffer).await?;
+            if bytes_read == 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::ConnectionReset,
+                    "connection reset by peer",
+                ));
             }
-            pinned_reader.mark_decrypted(T::SIZE_TO_READ - bytes_decrypted);
-        }
-        let sizeof_output = T::size_from_bytes(&pinned_reader.buffer()[..T::SIZE_TO_READ])?;
+            if self.encryption_enabled {
+                let decryption_starting_idx = self.reader.buffer.len() - bytes_read;
 
-        while pinned_reader.buffer().len() < sizeof_output {
-            let bytes_read = pinned_reader.read(&mut [0; 0]).await?;
-            assert_eq!(bytes_read, 0);
-        }
-
-        let bytes_decrypted = pinned_reader.bytes_decrypted();
-        if encryption_enabled && bytes_decrypted < sizeof_output {
-            self.aes_decrypt_cipher
-                .as_mut()
-                .unwrap()
-                .decrypt(&mut pinned_reader.buffer_mut()[bytes_decrypted..sizeof_output]);
-            pinned_reader.mark_decrypted(sizeof_output - bytes_decrypted);
+                self.aes_decrypt_cipher.as_mut().unwrap().decrypt(
+                    &mut self.reader.buffer
+                        [decryption_starting_idx..bytes_read + decryption_starting_idx],
+                );
+            }
         }
 
-        T::from_bytes(&pinned_reader.buffer()[..sizeof_output]).map(|output| {
-            pinned_reader.consume(sizeof_output);
-            output
-        })
+        loop {
+            let size = T::size_from_bytes(&self.reader.buffer)?;
+
+            if size <= self.reader.buffer.remaining() {
+                return T::from_bytes(&self.reader.buffer[..size]).map(|output| {
+                    self.reader.buffer.advance(size);
+                    output
+                });
+            }
+
+            let bytes_read = self.reader.stream.read_buf(&mut self.reader.buffer).await?;
+            if bytes_read == 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::ConnectionReset,
+                    "connection reset by peer",
+                ));
+            }
+            if self.encryption_enabled {
+                let decryption_starting_idx = self.reader.buffer.len() - bytes_read;
+                self.aes_decrypt_cipher.as_mut().unwrap().decrypt(
+                    &mut self.reader.buffer
+                        [decryption_starting_idx..bytes_read + decryption_starting_idx],
+                );
+            }
+        }
     }
 
     pub(crate) async fn read_network_type_with_size<T: NetworkType>(
         &mut self,
         size: usize,
     ) -> Result<T, std::io::Error> {
-        let encryption_enabled = self.encryption_enabled();
-        let bytes_decrypted = self.reader.bytes_decrypted();
-        let mut pinned_reader = std::pin::Pin::new(&mut self.reader);
+        while self.reader.buffer.remaining() < size {
+            let bytes_read = dbg!(self.reader.stream.read_buf(&mut self.reader.buffer).await?);
+            if bytes_read == 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::ConnectionReset,
+                    "connection reset by peer",
+                ));
+            }
 
-        while pinned_reader.buffer().len() < size {
-            // reads 0 bytes, just a way to fill the backing buffer, similar to the `fill_buffer` function.
-            let bytes_read = pinned_reader.read(&mut [0; 0]).await?;
-            assert_eq!(bytes_read, 0);
+            if self.encryption_enabled {
+                let decryption_starting_idx = self.reader.buffer.len() - bytes_read;
+                self.aes_decrypt_cipher.as_mut().unwrap().decrypt(
+                    &mut self.reader.buffer
+                        [decryption_starting_idx..bytes_read + decryption_starting_idx],
+                );
+            }
         }
 
-        if encryption_enabled && bytes_decrypted < size {
-            self.aes_decrypt_cipher
-                .as_mut()
-                .unwrap()
-                .decrypt(&mut pinned_reader.buffer_mut()[bytes_decrypted..size]);
-            pinned_reader.mark_decrypted(size - bytes_decrypted);
-        }
-
-        T::from_bytes(&pinned_reader.buffer()[0..size]).map(|output| {
-            pinned_reader.consume(size);
+        T::from_bytes(&self.reader.buffer[..size]).map(|output| {
+            self.reader.buffer.advance(size);
             output
         })
     }
