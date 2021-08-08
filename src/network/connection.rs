@@ -9,13 +9,29 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt, BufWriter};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::TcpStream;
 
-pub(crate) struct Connection {
-    reader: BufferedReader,
-    writer: BufWriter<OwnedWriteHalf>,
-    connection_state: ConnectionState,
+#[derive(Default)]
+struct EncryptionState {
     encryption_enabled: bool,
     aes_encrypt_cipher: Option<Cfb8<Aes128>>,
     aes_decrypt_cipher: Option<Cfb8<Aes128>>,
+}
+
+impl EncryptionState {
+    fn new() -> EncryptionState {
+        EncryptionState {
+            aes_decrypt_cipher: None,
+            aes_encrypt_cipher: None,
+            encryption_enabled: false,
+        }
+    }
+
+    fn encryption_cipher(&mut self) -> Option<&mut Cfb8<Aes128>> {
+        self.aes_encrypt_cipher.as_mut()
+    }
+
+    fn decryption_cipher(&mut self) -> Option<&mut Cfb8<Aes128>> {
+        self.aes_decrypt_cipher.as_mut()
+    }
 }
 
 pub(crate) struct BufferedReader {
@@ -36,6 +52,14 @@ impl BufferedReader {
     }
 }
 
+pub(crate) struct Connection {
+    reader: BufferedReader,
+    writer: BufWriter<OwnedWriteHalf>,
+    connection_state: ConnectionState,
+    encryption_state: EncryptionState,
+    compression_threshold: i32,
+}
+
 impl Connection {
     pub(crate) async fn new(ip: String, port: u16) -> Result<Connection, std::io::Error> {
         let stream = TcpStream::connect((ip, port)).await?;
@@ -46,9 +70,8 @@ impl Connection {
             reader: BufferedReader::with_capacity(reader, 1000000),
             writer: BufWriter::new(writer),
             connection_state: ConnectionState::Handshaking,
-            encryption_enabled: false,
-            aes_encrypt_cipher: None,
-            aes_decrypt_cipher: None,
+            encryption_state: EncryptionState::default(),
+            compression_threshold: -1,
         })
     }
 
@@ -65,10 +88,10 @@ impl Connection {
                     "connection reset by peer",
                 ));
             }
-            if self.encryption_enabled {
+            if self.encryption_enabled() {
                 let decryption_starting_idx = self.reader.buffer.len() - bytes_read;
 
-                self.aes_decrypt_cipher.as_mut().unwrap().decrypt(
+                self.encryption_state.decryption_cipher().unwrap().decrypt(
                     &mut self.reader.buffer
                         [decryption_starting_idx..bytes_read + decryption_starting_idx],
                 );
@@ -77,7 +100,6 @@ impl Connection {
 
         loop {
             let size = T::size_from_bytes(&self.reader.buffer)?;
-
             if size <= self.reader.buffer.remaining() {
                 return T::from_bytes(&self.reader.buffer[..size]).map(|output| {
                     self.reader.buffer.advance(size);
@@ -92,9 +114,10 @@ impl Connection {
                     "connection reset by peer",
                 ));
             }
-            if self.encryption_enabled {
+            if self.encryption_enabled() {
                 let decryption_starting_idx = self.reader.buffer.len() - bytes_read;
-                self.aes_decrypt_cipher.as_mut().unwrap().decrypt(
+
+                self.encryption_state.decryption_cipher().unwrap().decrypt(
                     &mut self.reader.buffer
                         [decryption_starting_idx..bytes_read + decryption_starting_idx],
                 );
@@ -115,9 +138,10 @@ impl Connection {
                 ));
             }
 
-            if self.encryption_enabled {
+            if self.encryption_enabled() {
                 let decryption_starting_idx = self.reader.buffer.len() - bytes_read;
-                self.aes_decrypt_cipher.as_mut().unwrap().decrypt(
+
+                self.encryption_state.decryption_cipher().unwrap().decrypt(
                     &mut self.reader.buffer
                         [decryption_starting_idx..bytes_read + decryption_starting_idx],
                 );
@@ -139,8 +163,8 @@ impl Connection {
         if self.encryption_enabled() {
             let mut to_write = vec![0; to_write.len()];
             to_write.clone_from_slice(network_type.as_bytes());
-            self.aes_encrypt_cipher
-                .as_mut()
+            self.encryption_state
+                .encryption_cipher()
                 .unwrap()
                 .encrypt(&mut to_write);
         }
@@ -156,7 +180,7 @@ impl Connection {
     }
 
     pub(crate) fn encryption_enabled(&self) -> bool {
-        self.encryption_enabled
+        self.encryption_state.encryption_enabled
     }
 
     pub(crate) fn enable_encryption(&mut self, shared_secret: &[u8; 16]) {
@@ -165,9 +189,9 @@ impl Connection {
         let cipher_encrypt = AesCfb8::new_from_slices(shared_secret, shared_secret).unwrap();
         let cipher_decrypt = AesCfb8::new_from_slices(shared_secret, shared_secret).unwrap();
 
-        self.encryption_enabled = true;
-        self.aes_encrypt_cipher = Some(cipher_encrypt);
-        self.aes_decrypt_cipher = Some(cipher_decrypt);
+        self.encryption_state.encryption_enabled = true;
+        self.encryption_state.aes_encrypt_cipher = Some(cipher_encrypt);
+        self.encryption_state.aes_decrypt_cipher = Some(cipher_decrypt);
     }
 
     pub(crate) fn set_connection_state(&mut self, new_state: ConnectionState) {
