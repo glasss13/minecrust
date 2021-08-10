@@ -330,7 +330,7 @@ fn mc_hex_digest(to_digest_list: &[&[u8]]) -> Option<String> {
     }
 
     // get rid of leading zero's since the array is meant to be one large integer.
-    let hash_string = hash_string.trim_matches('0').to_owned();
+    let hash_string = hash_string.trim_start_matches('0').to_owned();
 
     if hash_is_negative {
         return Some(format!("-{}", hash_string));
