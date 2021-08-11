@@ -315,12 +315,11 @@ fn mc_hex_digest(to_digest_list: &[&[u8]]) -> Option<String> {
 
     if hash_is_negative {
         let mut carry = true;
-
-        for i in (0..hash_bytes.len()).rev() {
-            hash_bytes[i] = !hash_bytes[i];
+        for byte in hash_bytes.iter_mut().rev() {
+            *byte = !*byte;
             if carry {
-                carry = hash_bytes[i] == 0xff;
-                hash_bytes[i] += 1;
+                carry = *byte == 0xff;
+                *byte += 1;
             }
         }
     }
