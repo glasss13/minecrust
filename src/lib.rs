@@ -186,6 +186,7 @@ impl ClientBuilder {
         handshake_packet.send(&mut connection).await?;
         login_packet.send(&mut connection).await?;
 
+        let (sender, mut receiver) = mpsc::channel(100);
         let mut client = ClientData {
             session,
             connection: Some(connection),
@@ -193,13 +194,10 @@ impl ClientBuilder {
             login_listeners: vec![],
         };
 
-        let (sender, mut receiver) = mpsc::channel(100);
-
         let packet_process_task = tokio::spawn(async move {
             loop {
-                let connection = client.connection.as_mut().unwrap();
                 tokio::select! {
-                    Ok(packet) = ClientBoundPacket::from_connection(connection) => {
+                    Ok(packet) = ClientBoundPacket::from_connection(client.connection_mut()) => {
                         println!("received a packet: {}", packet);
                         packet.process(&mut client).await.unwrap();
                     },
@@ -209,7 +207,7 @@ impl ClientBuilder {
                                 let _ = resp.send("pong".to_string());
                             },
                             ClientCommand::Disconnect => {
-                                connection.shutdown().await.unwrap();
+                                client.connection_mut().shutdown().await.unwrap();
                                 break;
                             }
                             ClientCommand::OnLogin {resp} => {
