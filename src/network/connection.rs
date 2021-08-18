@@ -3,8 +3,9 @@ use super::packets::ConnectionState;
 
 use aes::cipher::{AsyncStreamCipher, NewCipher};
 use aes::Aes128;
-use bytes::{Buf, BytesMut};
+use bytes::{Buf, BufMut, BytesMut};
 use cfb8::Cfb8;
+use miniz_oxide::inflate::core::{decompress, inflate_flags, DecompressorOxide};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufWriter};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::TcpStream;
@@ -34,6 +35,30 @@ impl EncryptionState {
     }
 }
 
+struct CompressionState {
+    // compressor: CompressorOxide,
+    decompressor: DecompressorOxide,
+    threshold: i32,
+    /// buffer to hold compressed data - only used if compression is actually enabled.
+    decompressed_buffer: BytesMut,
+}
+
+impl CompressionState {
+    fn new() -> CompressionState {
+        let decompressed_buffer = BytesMut::from(vec![0; 4096].as_slice());
+        println!(
+            "length of decompressed buffer: {}",
+            decompressed_buffer.len()
+        );
+        CompressionState {
+            // compressor: CompressorOxide::default(),
+            decompressor: DecompressorOxide::default(),
+            threshold: -1,
+            decompressed_buffer,
+        }
+    }
+}
+
 pub(crate) struct BufferedReader {
     stream: OwnedReadHalf,
     buffer: BytesMut,
@@ -57,10 +82,35 @@ pub(crate) struct Connection {
     writer: BufWriter<OwnedWriteHalf>,
     connection_state: ConnectionState,
     encryption_state: EncryptionState,
-    compression_threshold: i32,
+    compression_state: CompressionState,
 }
 
 impl Connection {
+    async fn read_buf(&mut self) -> Result<usize, std::io::Error> {
+        let bytes_read = self.reader.stream.read_buf(&mut self.reader.buffer).await?;
+
+        if bytes_read == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::ConnectionReset,
+                "connection reset by peer",
+            ));
+        }
+
+        if self.encryption_enabled() {
+            let decryption_starting_idx = self.reader.buffer.len() - bytes_read;
+
+            self.encryption_state.decryption_cipher().unwrap().decrypt(
+                &mut self.reader.buffer
+                    [decryption_starting_idx..bytes_read + decryption_starting_idx],
+            );
+        }
+        Ok(bytes_read)
+    }
+
+    async fn write_all(&mut self, to_write: &[u8]) -> Result<(), std::io::Error> {
+        todo!()
+    }
+
     pub(crate) async fn new(ip: String, port: u16) -> Result<Connection, std::io::Error> {
         let stream = TcpStream::connect((ip, port)).await?;
 
@@ -71,7 +121,7 @@ impl Connection {
             writer: BufWriter::new(writer),
             connection_state: ConnectionState::Handshaking,
             encryption_state: EncryptionState::default(),
-            compression_threshold: -1,
+            compression_state: CompressionState::new(),
         })
     }
 
@@ -81,21 +131,7 @@ impl Connection {
 
     pub(crate) async fn read_network_type<T: NetworkType>(&mut self) -> Result<T, std::io::Error> {
         while self.reader.buffer.remaining() < T::SIZE_TO_READ {
-            let bytes_read = self.reader.stream.read_buf(&mut self.reader.buffer).await?;
-            if bytes_read == 0 {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::ConnectionReset,
-                    "connection reset by peer",
-                ));
-            }
-            if self.encryption_enabled() {
-                let decryption_starting_idx = self.reader.buffer.len() - bytes_read;
-
-                self.encryption_state.decryption_cipher().unwrap().decrypt(
-                    &mut self.reader.buffer
-                        [decryption_starting_idx..bytes_read + decryption_starting_idx],
-                );
-            }
+            self.read_buf().await?;
         }
 
         loop {
@@ -107,21 +143,7 @@ impl Connection {
                 });
             }
 
-            let bytes_read = self.reader.stream.read_buf(&mut self.reader.buffer).await?;
-            if bytes_read == 0 {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::ConnectionReset,
-                    "connection reset by peer",
-                ));
-            }
-            if self.encryption_enabled() {
-                let decryption_starting_idx = self.reader.buffer.len() - bytes_read;
-
-                self.encryption_state.decryption_cipher().unwrap().decrypt(
-                    &mut self.reader.buffer
-                        [decryption_starting_idx..bytes_read + decryption_starting_idx],
-                );
-            }
+            self.read_buf().await?;
         }
     }
 
@@ -130,22 +152,7 @@ impl Connection {
         size: usize,
     ) -> Result<T, std::io::Error> {
         while self.reader.buffer.remaining() < size {
-            let bytes_read = dbg!(self.reader.stream.read_buf(&mut self.reader.buffer).await?);
-            if bytes_read == 0 {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::ConnectionReset,
-                    "connection reset by peer",
-                ));
-            }
-
-            if self.encryption_enabled() {
-                let decryption_starting_idx = self.reader.buffer.len() - bytes_read;
-
-                self.encryption_state.decryption_cipher().unwrap().decrypt(
-                    &mut self.reader.buffer
-                        [decryption_starting_idx..bytes_read + decryption_starting_idx],
-                );
-            }
+            self.read_buf().await?;
         }
 
         T::from_bytes(&self.reader.buffer[..size]).map(|output| {
@@ -196,5 +203,49 @@ impl Connection {
 
     pub(crate) fn set_connection_state(&mut self, new_state: ConnectionState) {
         self.connection_state = new_state;
+    }
+
+    pub(crate) fn set_compression(&mut self, threshold: i32) {
+        self.compression_state.threshold = threshold;
+    }
+
+    pub(crate) fn compression_threshold(&self) -> i32 {
+        self.compression_state.threshold
+    }
+
+    pub(crate) fn compression_enabled(&self) -> bool {
+        self.compression_state.threshold > 0
+    }
+
+    pub(crate) async fn decompress_data(
+        &mut self,
+        data_length: usize,
+    ) -> Result<(), std::io::Error> {
+        while self.reader.buffer.remaining() < data_length {
+            self.read_buf().await?;
+        }
+
+        let (_, _, decompressed_length) = decompress(
+            &mut self.compression_state.decompressor,
+            &self.reader.buffer[..data_length],
+            &mut self.compression_state.decompressed_buffer[..],
+            0,
+            inflate_flags::TINFL_FLAG_PARSE_ZLIB_HEADER
+                | inflate_flags::TINFL_FLAG_USING_NON_WRAPPING_OUTPUT_BUF,
+        );
+        self.reader.buffer.advance(data_length);
+
+        // put the decompressed data at the start of the buffer
+        self.reader.buffer.reverse();
+        self.compression_state.decompressed_buffer.reverse();
+
+        self.reader.buffer.put_slice(
+            &self.compression_state.decompressed_buffer
+                [self.compression_state.decompressed_buffer.len() - decompressed_length..],
+        );
+        self.reader.buffer.reverse();
+
+        self.compression_state.decompressor.init();
+        Ok(())
     }
 }

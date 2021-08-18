@@ -17,3 +17,4 @@ uuid = { version = "0.8.2", features = ["v4"] }
 openssl = { version = "0.10.35", features = ["vendored"] }
 pin-project-lite = "0.2.7"
 bytes = "1.0.1"
+miniz_oxide = "0.4.4"

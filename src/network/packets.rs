@@ -1,6 +1,6 @@
 use rand::{self, Rng};
 use sha1::Sha1;
-use std::fmt::{format, Write};
+use std::fmt::Write;
 
 use crate::network::authentication::yggdrasil;
 use crate::ClientData;
@@ -142,6 +142,8 @@ pub(crate) enum ClientBoundPacket {
         uuid: NetworkString,
         username: NetworkString,
     },
+    /// <https://wiki.vg/index.php?title=Protocol&oldid=7368#Set_Compression_2>.
+    SetCompression { threshold: Varint },
 }
 
 impl std::fmt::Display for ClientBoundPacket {
@@ -166,6 +168,10 @@ impl std::fmt::Display for ClientBoundPacket {
                 .field("uuid", &format_args!("{}", uuid))
                 .field("username", &format_args!("{}", username))
                 .finish(),
+            ClientBoundPacket::SetCompression { threshold } => f
+                .debug_struct("SetCompression")
+                .field("threshold", threshold)
+                .finish(),
         }
     }
 }
@@ -175,6 +181,20 @@ impl ClientBoundPacket {
         connection: &mut Connection,
     ) -> Result<ClientBoundPacket, std::io::Error> {
         let packet_length = connection.read_network_type::<Varint>().await?.to_i32();
+        let mut data_length = 0;
+        if connection.compression_enabled() {
+            data_length = connection.read_network_type::<Varint>().await?.to_i32();
+            if data_length == 0 {
+                println!("the data is uncompressed");
+            } else {
+                println!("the data is compressed");
+                connection
+                    .decompress_data(
+                        packet_length as usize - Varint::size_from_int32(data_length) as usize,
+                    )
+                    .await?;
+            }
+        }
         let packet_id = connection.read_network_type::<Varint>().await?.to_i32();
 
         match connection.connection_state() {
@@ -210,6 +230,11 @@ impl ClientBoundPacket {
                     let username = connection.read_network_type::<NetworkString>().await?;
 
                     Ok(ClientBoundPacket::LoginSuccess { uuid, username })
+                }
+                0x03 => {
+                    let threshold = connection.read_network_type::<Varint>().await?;
+
+                    Ok(ClientBoundPacket::SetCompression { threshold })
                 }
                 _ => todo!("id: {:#2x}", packet_id),
             },
@@ -264,28 +289,14 @@ impl ClientBoundPacket {
                     verify_token_length: Varint::from_i32(encrypted_verify_token.len() as i32),
                     verify_token: ByteArray::from_bytes(&encrypted_verify_token).unwrap(),
                 }
-                .send(&mut client.connection.as_mut().unwrap())
+                .send(client.connection_mut())
                 .await?;
                 println!("enabling encryption");
                 client.connection_mut().enable_encryption(&shared_secret);
-                // let to_encrypt_string = String::from("yawmadah");
-
-                // let mut to_encrypt = to_encrypt_string.into_bytes();
-
-                // cipher_encrypt.encrypt(&mut to_encrypt);
-
-                // cipher_decrypt.decrypt(&mut to_encrypt);
-
-                // println!(
-                //     "the unencrypted data is {}",
-                //     String::from_utf8(to_encrypt).unwrap()
-                // );
             }
             ClientBoundPacket::LoginSuccess { uuid, username } => {
                 client
-                    .connection
-                    .as_mut()
-                    .unwrap()
+                    .connection_mut()
                     .set_connection_state(ConnectionState::Play);
 
                 for listener in &client.login_listeners {
@@ -297,6 +308,14 @@ impl ClientBoundPacket {
                     username.to_string(),
                     uuid.to_string()
                 )
+            }
+            ClientBoundPacket::SetCompression { threshold } => {
+                println!("setting compression to {}", threshold.to_i32());
+                client
+                    .connection
+                    .as_mut()
+                    .unwrap()
+                    .set_compression(threshold.to_i32());
             }
         }
         Ok(())
@@ -342,6 +361,7 @@ impl Packet for ClientBoundPacket {
         match self {
             ClientBoundPacket::EncryptionRequest { .. } => 0x01,
             ClientBoundPacket::LoginSuccess { .. } => 0x02,
+            ClientBoundPacket::SetCompression { .. } => 0x03,
         }
     }
 
@@ -349,6 +369,7 @@ impl Packet for ClientBoundPacket {
         match self {
             ClientBoundPacket::EncryptionRequest { .. } => ConnectionState::Login,
             ClientBoundPacket::LoginSuccess { .. } => ConnectionState::Login,
+            ClientBoundPacket::SetCompression { .. } => ConnectionState::Login,
         }
     }
 }
