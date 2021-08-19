@@ -10,7 +10,6 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt, BufWriter};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::TcpStream;
 
-#[derive(Default)]
 struct EncryptionState {
     encryption_enabled: bool,
     aes_encrypt_cipher: Option<Cfb8<Aes128>>,
@@ -59,17 +58,17 @@ impl CompressionState {
     }
 }
 
-pub(crate) struct BufferedReader {
-    stream: OwnedReadHalf,
+pub(crate) struct BufferedReader<T: AsyncReadExt> {
+    stream: T,
     buffer: BytesMut,
 }
 
-impl BufferedReader {
-    pub(crate) fn new(stream: OwnedReadHalf) -> BufferedReader {
+impl<T: AsyncReadExt> BufferedReader<T> {
+    pub(crate) fn new(stream: T) -> BufferedReader<T> {
         BufferedReader::with_capacity(stream, 4096)
     }
 
-    pub(crate) fn with_capacity(stream: OwnedReadHalf, capacity: usize) -> BufferedReader {
+    pub(crate) fn with_capacity(stream: T, capacity: usize) -> BufferedReader<T> {
         BufferedReader {
             stream,
             buffer: BytesMut::with_capacity(capacity),
@@ -78,7 +77,7 @@ impl BufferedReader {
 }
 
 pub(crate) struct Connection {
-    reader: BufferedReader,
+    reader: BufferedReader<OwnedReadHalf>,
     writer: BufWriter<OwnedWriteHalf>,
     connection_state: ConnectionState,
     encryption_state: EncryptionState,
@@ -120,7 +119,7 @@ impl Connection {
             reader: BufferedReader::with_capacity(reader, 1000000),
             writer: BufWriter::new(writer),
             connection_state: ConnectionState::Handshaking,
-            encryption_state: EncryptionState::default(),
+            encryption_state: EncryptionState::new(),
             compression_state: CompressionState::new(),
         })
     }
