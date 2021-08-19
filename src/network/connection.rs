@@ -45,10 +45,6 @@ struct CompressionState {
 impl CompressionState {
     fn new() -> CompressionState {
         let decompressed_buffer = BytesMut::from(vec![0; 4096].as_slice());
-        println!(
-            "length of decompressed buffer: {}",
-            decompressed_buffer.len()
-        );
         CompressionState {
             // compressor: CompressorOxide::default(),
             decompressor: DecompressorOxide::default(),
@@ -58,17 +54,17 @@ impl CompressionState {
     }
 }
 
-pub(crate) struct BufferedReader<T: AsyncReadExt> {
+struct BufferedReader<T: AsyncReadExt> {
     stream: T,
     buffer: BytesMut,
 }
 
 impl<T: AsyncReadExt> BufferedReader<T> {
-    pub(crate) fn new(stream: T) -> BufferedReader<T> {
+    pub fn new(stream: T) -> BufferedReader<T> {
         BufferedReader::with_capacity(stream, 4096)
     }
 
-    pub(crate) fn with_capacity(stream: T, capacity: usize) -> BufferedReader<T> {
+    pub fn with_capacity(stream: T, capacity: usize) -> BufferedReader<T> {
         BufferedReader {
             stream,
             buffer: BytesMut::with_capacity(capacity),
